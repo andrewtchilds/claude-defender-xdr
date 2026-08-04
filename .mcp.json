@@ -1,0 +1,7 @@
+{
+  "defender-xdr": {
+    "type": "stdio",
+    "command": "node",
+    "args": ["${CLAUDE_PLUGIN_ROOT}/dist/server/index.js"]
+  }
+}
