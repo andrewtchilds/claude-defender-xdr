@@ -11,14 +11,12 @@
     "tenant_id": {
       "type": "string",
       "title": "Entra tenant ID",
-      "description": "GUID of the Microsoft Entra tenant to query. Find it in Entra ID > Overview.",
-      "required": true
+      "description": "GUID of the Microsoft Entra tenant to query. Find it in Entra ID > Overview."
     },
     "client_id": {
       "type": "string",
       "title": "Entra application (client) ID",
-      "description": "GUID of a public-client app registration with redirect URI http://localhost and admin-consented delegated Microsoft Graph ThreatHunting.Read.All. Not a secret, and client secrets are never accepted.",
-      "required": true
+      "description": "GUID of a public-client app registration with redirect URI http://localhost and admin-consented delegated Microsoft Graph ThreatHunting.Read.All. Not a secret, and client secrets are never accepted."
     },
     "api_base_url": {
       "type": "string",

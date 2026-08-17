@@ -52,9 +52,19 @@ export function buildScopes(c: Pick<XdrConfig, "apiBaseUrl" | "scopeMode">): str
   return [c.scopeMode === "default" ? `${resource}/.default` : `${resource}/ThreatHunting.Read.All`];
 }
 
+const OPTION_KEYS: Record<string, string> = { tenantId: "tenant_id", clientId: "client_id" };
+
 function guid(value: unknown, name: string): string {
   const pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  if (typeof value !== "string" || !pattern.test(value)) throw new Error(`${name} must be a GUID`);
+  if (typeof value !== "string" || !pattern.test(value)) {
+    const option = OPTION_KEYS[name];
+    // Point at the plugin dialog rather than a validation rule the user never wrote.
+    const fix = option
+      ? ` Set "${option}" by running /plugin configure defender-xdr.`
+      : "";
+    const detail = value === undefined || value === "" ? "is not set" : "must be a GUID";
+    throw new Error(`${name} ${detail}.${fix}`);
+  }
   return value;
 }
 

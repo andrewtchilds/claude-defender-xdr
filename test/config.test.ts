@@ -60,6 +60,8 @@ describe("validateConfig", () => {
 
   it("rejects malformed identifiers and bounds", () => {
     expect(() => validateConfig(base({ tenantId: "not-a-guid" }))).toThrow("tenantId must be a GUID");
+    expect(() => validateConfig(base({ tenantId: "not-a-guid" }))).toThrow("/plugin configure");
+    expect(() => validateConfig(base({ tenantId: undefined }))).toThrow("tenantId is not set");
     expect(() => validateConfig(base({ maximumRows: 0 }))).toThrow("maximumRows");
     expect(() => validateConfig(base({ maximumRows: 10001 }))).toThrow("maximumRows");
     expect(() => validateConfig(base({ maximumRows: 1.5 }))).toThrow("maximumRows");
