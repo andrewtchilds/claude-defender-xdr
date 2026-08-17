@@ -1,10 +1,50 @@
 {
   "name": "defender-xdr",
   "displayName": "Microsoft Defender XDR",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read-only Microsoft Defender XDR Advanced Hunting tools and investigation skills for Claude Code",
   "author": { "name": "Andrew Childs" },
   "license": "MIT",
   "keywords": ["security", "defender", "xdr", "kql", "advanced-hunting", "microsoft", "incident-response"],
-  "mcpServers": "./mcp-config.json"
+  "mcpServers": "./mcp-config.json",
+  "userConfig": {
+    "tenant_id": {
+      "type": "string",
+      "title": "Entra tenant ID",
+      "description": "GUID of the Microsoft Entra tenant to query. Find it in Entra ID > Overview.",
+      "required": true
+    },
+    "client_id": {
+      "type": "string",
+      "title": "Entra application (client) ID",
+      "description": "GUID of a public-client app registration with redirect URI http://localhost and admin-consented delegated Microsoft Graph ThreatHunting.Read.All. Not a secret, and client secrets are never accepted.",
+      "required": true
+    },
+    "api_base_url": {
+      "type": "string",
+      "title": "Microsoft Graph endpoint",
+      "description": "Change only for sovereign clouds: https://graph.microsoft.us (US Gov) or https://microsoftgraph.chinacloudapi.cn (China).",
+      "default": "https://graph.microsoft.com"
+    },
+    "maximum_rows": {
+      "type": "number",
+      "title": "Maximum rows per query",
+      "description": "Ceiling on rows returned to Claude. Queries cannot exceed this.",
+      "default": 1000,
+      "min": 1,
+      "max": 10000
+    },
+    "default_lookback": {
+      "type": "string",
+      "title": "Default lookback window",
+      "description": "Timespan used when a query does not specify one, such as 7d or 24h.",
+      "default": "7d"
+    },
+    "allow_unencrypted_token_cache": {
+      "type": "boolean",
+      "title": "Allow unencrypted token cache",
+      "description": "Only enable if your OS credential store is unavailable. Tokens are then written to an owner-only (0600) plaintext file instead of the Keychain.",
+      "default": false
+    }
+  }
 }

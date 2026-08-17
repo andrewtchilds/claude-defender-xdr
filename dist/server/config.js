@@ -112,18 +112,108 @@ export async function readStoredConfig(path = getConfigPath()) {
         throw new Error(`Unable to read Defender XDR config at ${path}: ${error.message}`);
     }
 }
-/** Precedence: built-in defaults < stored config file < CLAUDE_XDR_* environment overrides. */
+function bool(value) {
+    if (value === undefined)
+        return undefined;
+    return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+function integer(value) {
+    if (value === undefined)
+        return undefined;
+    const parsed = Number(value.trim());
+    return Number.isFinite(parsed) ? parsed : undefined;
+}
+function defined(entries) {
+    return Object.fromEntries(Object.entries(entries).filter(([, value]) => value !== undefined));
+}
+const PLUGIN_NAME = "defender-xdr";
+/** Maps `userConfig` option keys onto this module's config shape. */
+function fromOptions(options) {
+    const text = (value) => (typeof value === "string" && value ? value : undefined);
+    return defined({
+        tenantId: text(options.tenant_id),
+        clientId: text(options.client_id),
+        apiBaseUrl: text(options.api_base_url),
+        defaultLookback: text(options.default_lookback),
+        maximumRows: typeof options.maximum_rows === "number" ? options.maximum_rows : undefined,
+        allowUnencryptedTokenCache: typeof options.allow_unencrypted_token_cache === "boolean"
+            ? options.allow_unencrypted_token_cache
+            : undefined,
+    });
+}
+/**
+ * Values collected by Claude Code's `userConfig` prompt, which it exports to plugin
+ * subprocesses as CLAUDE_PLUGIN_OPTION_<KEY>. This is how the MCP server is configured.
+ */
+function pluginOptions(env) {
+    return defined({
+        tenantId: env.CLAUDE_PLUGIN_OPTION_TENANT_ID,
+        clientId: env.CLAUDE_PLUGIN_OPTION_CLIENT_ID,
+        apiBaseUrl: env.CLAUDE_PLUGIN_OPTION_API_BASE_URL,
+        defaultLookback: env.CLAUDE_PLUGIN_OPTION_DEFAULT_LOOKBACK,
+        maximumRows: integer(env.CLAUDE_PLUGIN_OPTION_MAXIMUM_ROWS),
+        allowUnencryptedTokenCache: bool(env.CLAUDE_PLUGIN_OPTION_ALLOW_UNENCRYPTED_TOKEN_CACHE),
+    });
+}
+function claudeSettingsPath(env) {
+    const base = env.CLAUDE_CONFIG_DIR || join(env.HOME || ".", ".claude");
+    return join(base, "settings.json");
+}
+/**
+ * Reads the same `userConfig` values from Claude Code's user settings.
+ *
+ * Claude Code exports CLAUDE_PLUGIN_OPTION_* only to MCP server and hook subprocesses,
+ * not to the Bash tool, so the login helper cannot see them. Reading the documented
+ * `pluginConfigs` location lets sign-in use the values the user already entered at the
+ * plugin prompt instead of asking for them a second time.
+ */
+export async function readClaudePluginOptions(env = process.env) {
+    let settings;
+    try {
+        settings = JSON.parse(await readFile(claudeSettingsPath(env), "utf8"));
+    }
+    catch {
+        return {};
+    }
+    const configs = settings?.pluginConfigs;
+    if (!configs || typeof configs !== "object")
+        return {};
+    // The key is `<plugin>@<marketplace>`, and the marketplace name varies by install.
+    const entry = Object.entries(configs).find(([key]) => key === PLUGIN_NAME || key.startsWith(`${PLUGIN_NAME}@`))?.[1];
+    const options = entry?.options;
+    return options && typeof options === "object" ? options : {};
+}
+/**
+ * Precedence, lowest to highest: built-in defaults, stored config file, Claude Code
+ * plugin options (from user settings, then from the environment), and finally
+ * CLAUDE_XDR_* variables as a deliberate manual override.
+ *
+ * The authority host is derived from the chosen Graph cloud unless explicitly set, so
+ * selecting a sovereign cloud through the plugin prompt cannot leave the two mismatched.
+ */
 export async function loadConfig(options = {}) {
-    const stored = await readStoredConfig(options.path);
     const env = options.env ?? process.env;
-    return validateConfig({
+    const stored = await readStoredConfig(options.path);
+    const claudeOptions = options.claudeOptions ?? (await readClaudePluginOptions(env));
+    const merged = {
         ...DEFAULT_CONFIG,
         ...stored,
-        ...(env.CLAUDE_XDR_TENANT_ID ? { tenantId: env.CLAUDE_XDR_TENANT_ID } : {}),
-        ...(env.CLAUDE_XDR_CLIENT_ID ? { clientId: env.CLAUDE_XDR_CLIENT_ID } : {}),
-        ...(env.CLAUDE_XDR_API_BASE_URL ? { apiBaseUrl: env.CLAUDE_XDR_API_BASE_URL } : {}),
-        ...(env.CLAUDE_XDR_AUTHORITY_HOST ? { authorityHost: env.CLAUDE_XDR_AUTHORITY_HOST } : {}),
-    });
+        ...fromOptions(claudeOptions),
+        ...pluginOptions(env),
+        ...defined({
+            tenantId: env.CLAUDE_XDR_TENANT_ID,
+            clientId: env.CLAUDE_XDR_CLIENT_ID,
+            apiBaseUrl: env.CLAUDE_XDR_API_BASE_URL,
+            authorityHost: env.CLAUDE_XDR_AUTHORITY_HOST,
+        }),
+    };
+    const explicitAuthority = env.CLAUDE_XDR_AUTHORITY_HOST ?? stored.authorityHost;
+    if (!explicitAuthority && typeof merged.apiBaseUrl === "string") {
+        const derived = GRAPH_CLOUDS.get(merged.apiBaseUrl.replace(/\/+$/, ""));
+        if (derived)
+            merged.authorityHost = derived;
+    }
+    return validateConfig(merged);
 }
 /** Writes atomically through an owner-only temp file so a crash cannot leave a partial config. */
 export async function saveStoredConfig(config, path = getConfigPath()) {

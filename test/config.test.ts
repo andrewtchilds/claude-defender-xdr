@@ -4,6 +4,7 @@ import {
   buildScopes,
   DEFAULT_CONFIG,
   loadConfig,
+  readClaudePluginOptions,
   validateConfig,
 } from "../server/config.js";
 
@@ -92,6 +93,7 @@ describe("loadConfig", () => {
   it("lets environment overrides supply identifiers when no file exists", async () => {
     const config = await loadConfig({
       path: missingPath,
+      claudeOptions: {},
       env: { CLAUDE_XDR_TENANT_ID: IDS.tenantId, CLAUDE_XDR_CLIENT_ID: IDS.clientId },
     });
     expect(config.tenantId).toBe(IDS.tenantId);
@@ -102,6 +104,7 @@ describe("loadConfig", () => {
     await expect(
       loadConfig({
         path: missingPath,
+        claudeOptions: {},
         env: {
           CLAUDE_XDR_TENANT_ID: IDS.tenantId,
           CLAUDE_XDR_CLIENT_ID: IDS.clientId,
@@ -109,5 +112,120 @@ describe("loadConfig", () => {
         },
       }),
     ).rejects.toThrow("official Microsoft Graph");
+  });
+});
+
+describe("Claude Code plugin options", () => {
+  const missingPath = "/nonexistent/claude-defender-xdr/config.json";
+
+  it("configures the plugin entirely from CLAUDE_PLUGIN_OPTION_* variables", async () => {
+    const config = await loadConfig({
+      path: missingPath,
+      claudeOptions: {},
+      env: {
+        CLAUDE_PLUGIN_OPTION_TENANT_ID: IDS.tenantId,
+        CLAUDE_PLUGIN_OPTION_CLIENT_ID: IDS.clientId,
+        CLAUDE_PLUGIN_OPTION_MAXIMUM_ROWS: "250",
+        CLAUDE_PLUGIN_OPTION_DEFAULT_LOOKBACK: "24h",
+        CLAUDE_PLUGIN_OPTION_ALLOW_UNENCRYPTED_TOKEN_CACHE: "false",
+      },
+    });
+    expect(config.tenantId).toBe(IDS.tenantId);
+    expect(config.maximumRows).toBe(250);
+    expect(config.defaultLookback).toBe("24h");
+    expect(config.allowUnencryptedTokenCache).toBe(false);
+  });
+
+  it("derives the authority host when a sovereign cloud is selected", async () => {
+    const config = await loadConfig({
+      path: missingPath,
+      claudeOptions: {},
+      env: {
+        CLAUDE_PLUGIN_OPTION_TENANT_ID: IDS.tenantId,
+        CLAUDE_PLUGIN_OPTION_CLIENT_ID: IDS.clientId,
+        CLAUDE_PLUGIN_OPTION_API_BASE_URL: "https://graph.microsoft.us",
+      },
+    });
+    expect(config.authorityHost).toBe("https://login.microsoftonline.us");
+  });
+
+  it("accepts the documented boolean spellings", async () => {
+    for (const [raw, expected] of [["true", true], ["1", true], ["Yes", true], ["false", false]] as const) {
+      const config = await loadConfig({
+        path: missingPath,
+        claudeOptions: {},
+        env: {
+          CLAUDE_PLUGIN_OPTION_TENANT_ID: IDS.tenantId,
+          CLAUDE_PLUGIN_OPTION_CLIENT_ID: IDS.clientId,
+          CLAUDE_PLUGIN_OPTION_ALLOW_UNENCRYPTED_TOKEN_CACHE: raw,
+        },
+      });
+      expect(config.allowUnencryptedTokenCache, raw).toBe(expected);
+    }
+  });
+
+  it("lets an explicit CLAUDE_XDR_* override win over the plugin option", async () => {
+    const other = "44444444-4444-4444-8444-444444444444";
+    const config = await loadConfig({
+      path: missingPath,
+      claudeOptions: {},
+      env: {
+        CLAUDE_PLUGIN_OPTION_TENANT_ID: IDS.tenantId,
+        CLAUDE_PLUGIN_OPTION_CLIENT_ID: IDS.clientId,
+        CLAUDE_XDR_TENANT_ID: other,
+      },
+    });
+    expect(config.tenantId).toBe(other);
+  });
+});
+
+describe("reading userConfig from Claude Code settings", () => {
+  const missingPath = "/nonexistent/claude-defender-xdr/config.json";
+
+  it("applies options the user entered at the plugin prompt", async () => {
+    const config = await loadConfig({
+      path: missingPath,
+      env: {},
+      claudeOptions: {
+        tenant_id: IDS.tenantId,
+        client_id: IDS.clientId,
+        maximum_rows: 500,
+        allow_unencrypted_token_cache: true,
+      },
+    });
+    expect(config.tenantId).toBe(IDS.tenantId);
+    expect(config.maximumRows).toBe(500);
+    expect(config.allowUnencryptedTokenCache).toBe(true);
+  });
+
+  it("ignores blank and wrongly typed option values", async () => {
+    const config = await loadConfig({
+      path: missingPath,
+      env: {},
+      claudeOptions: {
+        tenant_id: IDS.tenantId,
+        client_id: IDS.clientId,
+        default_lookback: "",
+        maximum_rows: "500",
+        allow_unencrypted_token_cache: "true",
+      },
+    });
+    expect(config.defaultLookback).toBe(DEFAULT_CONFIG.defaultLookback);
+    expect(config.maximumRows).toBe(DEFAULT_CONFIG.maximumRows);
+    expect(config.allowUnencryptedTokenCache).toBe(false);
+  });
+
+  it("returns nothing when settings are absent or unreadable", async () => {
+    expect(await readClaudePluginOptions({ CLAUDE_CONFIG_DIR: "/nonexistent/claude" })).toEqual({});
+  });
+
+  it("lets the MCP server environment win over stored settings", async () => {
+    const other = "44444444-4444-4444-8444-444444444444";
+    const config = await loadConfig({
+      path: missingPath,
+      env: { CLAUDE_PLUGIN_OPTION_TENANT_ID: other },
+      claudeOptions: { tenant_id: IDS.tenantId, client_id: IDS.clientId },
+    });
+    expect(config.tenantId).toBe(other);
   });
 });

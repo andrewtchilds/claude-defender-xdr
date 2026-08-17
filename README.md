@@ -63,17 +63,44 @@ you change `server/`; `npm run verify` fails if the two drift apart.
 > If `npm ci` has not been run, `xdr_run_query` and sign-in will fail. `xdr_get_schema`
 > still works offline from the bundled snapshot.
 
-## Sign in
+## Configure and sign in
 
-Run `/defender-xdr:xdr-login` (or `claude-defender-xdr-login`, which the plugin puts on the
-Bash tool's `PATH` while enabled). It prompts for the tenant and client IDs on first use.
+Claude Code prompts for the plugin's settings when it is enabled, via the `userConfig`
+declaration in `plugin.json`. Re-open that dialog any time with:
 
-Configuration lives at `~/.config/claude-defender-xdr/config.json` (or `$XDG_CONFIG_HOME`),
-alongside the token cache. Environment overrides: `CLAUDE_XDR_TENANT_ID`,
-`CLAUDE_XDR_CLIENT_ID`, `CLAUDE_XDR_API_BASE_URL`, `CLAUDE_XDR_AUTHORITY_HOST`.
+```
+/plugin configure defender-xdr
+```
 
-US Gov (`https://graph.microsoft.us`) and China (`https://microsoftgraph.chinacloudapi.cn`)
-clouds are supported; the authority host must match the chosen cloud.
+| Option | Required | Default |
+| --- | --- | --- |
+| Entra tenant ID | yes | — |
+| Entra application (client) ID | yes | — |
+| Microsoft Graph endpoint | no | `https://graph.microsoft.com` |
+| Maximum rows per query | no | `1000` |
+| Default lookback window | no | `7d` |
+| Allow unencrypted token cache | no | `false` |
+
+You can also set them at install time:
+
+```bash
+claude plugin install defender-xdr@<marketplace> \
+  --config tenant_id=<guid> --config client_id=<guid>
+```
+
+Then sign in with `/defender-xdr:xdr-login`. It opens the system browser and needs no
+arguments — it reads the same settings you entered above.
+
+Selecting a sovereign cloud (`https://graph.microsoft.us` or
+`https://microsoftgraph.chinacloudapi.cn`) derives the matching Entra authority
+automatically, so the two cannot end up mismatched.
+
+**Standalone use**, outside the plugin: settings fall back to
+`~/.config/claude-defender-xdr/config.json` (or `$XDG_CONFIG_HOME`), and
+`claude-defender-xdr-login --tenant <guid> --client <guid>` writes that file. The
+`CLAUDE_XDR_TENANT_ID`, `CLAUDE_XDR_CLIENT_ID`, `CLAUDE_XDR_API_BASE_URL`, and
+`CLAUDE_XDR_AUTHORITY_HOST` variables override everything else. Run
+`claude-defender-xdr-login --show` to see what the resolved configuration is.
 
 ## Safety
 
