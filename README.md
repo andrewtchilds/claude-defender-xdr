@@ -1,124 +1,127 @@
-# claude-defender-xdr
+# Microsoft Defender XDR for Claude Code
 
-A Claude Code plugin for read-only Microsoft Defender XDR Advanced Hunting: two MCP tools
-plus investigation skills for endpoint, identity, messaging, and cross-domain cases.
+Ask questions about your Defender XDR data in plain English. Claude writes the KQL, runs it
+against Advanced Hunting, and explains what came back.
 
-## What it provides
+```
+> which devices ran encoded powershell in the last 24 hours?
+> show me failed sign-ins for that user, grouped by country
+> did anyone else receive email from that sender?
+```
 
-| Component | Name | Purpose |
+## What it does
+
+The plugin adds four tools to Claude Code:
+
+| Tool | Purpose |
+| --- | --- |
+| `xdr_login` | Opens your browser to sign in to Microsoft. Needed once. |
+| `xdr_logout` | Removes the sign-in cached on this machine. |
+| `xdr_run_query` | Runs a read-only KQL query against Advanced Hunting. |
+| `xdr_get_schema` | Looks up hunting tables and columns. Works without signing in. |
+
+It also installs four investigation skills — cross-domain, endpoint, identity, and messaging —
+that teach Claude how to scope an investigation, pick the cheapest table, and pivot on
+indicators rather than dumping raw events.
+
+Everything is read-only. Advanced Hunting cannot modify tenant state, and the only permission
+requested is the read-only `ThreatHunting.Read.All`.
+
+## Setup
+
+### 1. Create an Entra app registration
+
+In the [Entra admin center](https://entra.microsoft.com) under **App registrations → New
+registration**:
+
+- **Supported account types**: accounts in this organizational directory only
+- **Redirect URI**: select **Public client/native**, and enter `http://localhost`
+
+Then on the app you just created:
+
+- **Authentication** → enable **Allow public client flows**
+- **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated permissions**
+  → add **ThreatHunting.Read.All** → then **Grant admin consent**
+
+Copy the **Directory (tenant) ID** and **Application (client) ID** from the Overview page.
+Neither is a secret. This plugin never uses a client secret.
+
+Each person who uses the plugin also needs a Defender XDR role that permits Advanced Hunting.
+The app registration grants the app's ability to ask; their role decides what they can see.
+
+### 2. Install and configure
+
+```bash
+/plugin marketplace add <this-repo>
+/plugin install defender-xdr
+```
+
+Claude Code prompts for the tenant ID and application ID as part of installing. If you skip
+that, or need to change them later, run `/plugin configure defender-xdr`.
+
+**Restart Claude Code after configuring.** The values reach the server through its environment
+when it starts, so a server that is already running will not see them.
+
+### 3. Sign in
+
+Run `/defender-xdr:xdr-login`, or just ask a question — Claude will call `xdr_login` when it
+finds no cached sign-in. Your browser opens, you complete the normal Microsoft sign-in
+including MFA, and the tab tells you when to come back.
+
+The sign-in is cached, so you normally do this once. Microsoft decides when it expires; when
+that happens, sign in again.
+
+## Configuration
+
+All settings live in `/plugin configure defender-xdr`.
+
+| Setting | Default | Notes |
 | --- | --- | --- |
-| MCP tool | `xdr_run_query` | Bounded, read-only KQL against Advanced Hunting via Microsoft Graph |
-| MCP tool | `xdr_get_schema` | List, search, or describe hunting tables from a bundled schema snapshot, optionally verified live against the tenant |
-| Command | `/defender-xdr:xdr-login` | Explicit interactive Entra sign-in |
-| Command | `/defender-xdr:xdr-logout` | Remove the cached account |
-| Skills | `defender-xdr-investigation` and the endpoint, identity, and messaging branches | Evidence funnel, bounded KQL patterns, uncertainty handling, and reporting contract |
+| Entra tenant ID | — | Required. |
+| Entra application (client) ID | — | Required. |
+| Microsoft Graph endpoint | `https://graph.microsoft.com` | Change only for sovereign clouds. |
+| Maximum rows per query | 1000 | A hard ceiling; Claude cannot raise it per query. |
+| Default lookback window | `7d` | Used when your question implies no time range. |
 
-Design boundaries:
+For US Gov or China clouds, set the Graph endpoint to `https://graph.microsoft.us` or
+`https://microsoftgraph.chinacloudapi.cn`. The matching Entra login host is selected
+automatically, so the two can never be mismatched.
 
-- **Read-only.** Only `POST /v1.0/security/runHuntingQuery`, which cannot change tenant state.
-- **No implicit authentication.** MCP tools acquire cached tokens silently and never open a
-  browser. Sign-in is always an explicit user action.
-- **No client secrets.** Delegated public-client flow only; a `clientSecret` in the config
-  file is rejected outright.
-- **Secure token storage.** MSAL uses the OS credential store. An owner-only (0600)
-  plaintext fallback requires interactive approval.
+## Where things are stored
 
-## Prerequisites
+`~/.config/claude-defender-xdr/` (mode `0700`) holds:
 
-Node.js 20 or newer, and a Microsoft Entra app registration with:
+- `token.json` (mode `0600`) — the refresh token and the signed-in username.
+- `exports/` — full result sets, written only when you explicitly ask Claude to export.
 
-1. A **Mobile and desktop applications** platform with redirect URI `http://localhost`.
-2. Public client flows enabled.
-3. The delegated Microsoft Graph permission `ThreatHunting.Read.All`.
-4. Tenant admin consent.
+Delete the directory, or run `/defender-xdr:xdr-logout`, to remove the cached sign-in.
 
-The signed-in user also needs Defender RBAC covering the data being queried.
+## Troubleshooting
 
-## Install
+**"Defender XDR is not configured"** — run `/plugin configure defender-xdr`, then restart
+Claude Code. This message also appears when you configured the plugin but did not restart.
 
-This plugin has a native dependency (`keytar`, via `@azure/msal-node-extensions`) for the
-OS credential store, so it needs an `npm install` after the plugin files are in place.
-Claude Code installs plugins by cloning without running a build, so do this once:
+**"Access denied" (403)** — admin consent was not granted for `ThreatHunting.Read.All`, or
+your account lacks a Defender XDR role permitting Advanced Hunting.
 
-```bash
-git clone <repository-url> claude-defender-xdr
-cd claude-defender-xdr
-npm ci
-```
+**Sign-in fails with AADSTS7000218 or a redirect error** — the app registration is not a
+public client. Enable **Allow public client flows** and confirm `http://localhost` is
+registered under **Mobile and desktop applications**.
 
-On Linux, `keytar` also needs `libsecret` (`sudo apt-get install libsecret-1-dev`).
+**The browser never opens** — the tool prints the failure. On Linux, install `xdg-utils`.
 
-Then load it:
+## Development
 
 ```bash
-claude --plugin-dir /path/to/claude-defender-xdr
+npm install
+npm run verify   # typecheck, tests, build, and confirm dist/ is current
 ```
 
-Or add the repository through a [plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces)
-and run `npm ci` inside the installed plugin directory.
+`src/` is bundled by esbuild into a single `dist/server.js`, which is committed. Claude Code
+installs plugins by cloning, with no install or build step, so the server must run straight
+from the repository with no `node_modules` present. Rebuild and commit `dist/` with any
+change to `src/`.
 
-`dist/` is committed, so no build step is required to run the plugin. Rebuild it whenever
-you change `server/`; `npm run verify` fails if the two drift apart.
+## License
 
-> If `npm ci` has not been run, `xdr_run_query` and sign-in will fail. `xdr_get_schema`
-> still works offline from the bundled snapshot.
-
-## Configure and sign in
-
-Claude Code prompts for the plugin's settings when it is enabled, via the `userConfig`
-declaration in `plugin.json`. Re-open that dialog any time with:
-
-```
-/plugin configure defender-xdr
-```
-
-| Option | Required | Default |
-| --- | --- | --- |
-| Entra tenant ID | yes | — |
-| Entra application (client) ID | yes | — |
-| Microsoft Graph endpoint | no | `https://graph.microsoft.com` |
-| Maximum rows per query | no | `1000` |
-| Default lookback window | no | `7d` |
-| Allow unencrypted token cache | no | `false` |
-
-You can also set them at install time:
-
-```bash
-claude plugin install defender-xdr@<marketplace> \
-  --config tenant_id=<guid> --config client_id=<guid>
-```
-
-Then sign in with `/defender-xdr:xdr-login`. It opens the system browser and needs no
-arguments — it reads the same settings you entered above.
-
-Selecting a sovereign cloud (`https://graph.microsoft.us` or
-`https://microsoftgraph.chinacloudapi.cn`) derives the matching Entra authority
-automatically, so the two cannot end up mismatched.
-
-**Standalone use**, outside the plugin: settings fall back to
-`~/.config/claude-defender-xdr/config.json` (or `$XDG_CONFIG_HOME`), and
-`claude-defender-xdr-login --tenant <guid> --client <guid>` writes that file. The
-`CLAUDE_XDR_TENANT_ID`, `CLAUDE_XDR_CLIENT_ID`, `CLAUDE_XDR_API_BASE_URL`, and
-`CLAUDE_XDR_AUTHORITY_HOST` variables override everything else. Run
-`claude-defender-xdr-login --show` to see what the resolved configuration is.
-
-## Safety
-
-Queries are bounded by timespan, configured row limit, a 25 MiB response ceiling, and a
-50 KiB tool-output limit. Truncated output is marked and is deliberately not valid JSON, so
-a prefix cannot be mistaken for a complete result set.
-
-Tenant data is not written to disk unless the user explicitly sets `export_results=true`,
-which writes the full response to an owner-only file under
-`~/.config/claude-defender-xdr/exports/`. See [SECURITY.md](SECURITY.md).
-
-## Develop
-
-```bash
-npm ci
-npm run verify   # typecheck, tests, rebuild, dist freshness, plugin manifest validation
-```
-
-Layout: `server/` is the MCP server (TypeScript, compiled to `dist/`), `bin/` holds the
-PATH shims Claude Code exposes, `scripts/` the login/logout helpers, `skills/` the
-investigation skills, and `schema-snapshot/` the bundled Advanced Hunting schema.
+MIT. See [LICENSE](LICENSE) and [SECURITY.md](SECURITY.md).

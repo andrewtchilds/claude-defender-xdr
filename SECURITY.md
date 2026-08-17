@@ -1,53 +1,60 @@
 # Security
 
-## Design boundaries
+## Reporting a vulnerability
 
-- **Read-only by construction.** The only API call is `POST /v1.0/security/runHuntingQuery`,
-  which cannot write or change tenant state. Operational actions appear in reports as
-  recommendations for authorized personnel, never as tool calls.
-- **Delegated public-client authentication only.** Client secrets are rejected during config
-  validation. The redirect URI is pinned to `http://localhost`, and `apiBaseUrl` is pinned to
-  an official Microsoft Graph cloud with a matching Entra authority.
-- **No implicit authentication.** MCP tools only acquire cached tokens silently and surface
-  `AuthenticationRequiredError` otherwise. They never open a browser. Interactive sign-in
-  happens only through the explicit `/defender-xdr:xdr-login` command.
-- **Token validation before use.** Every acquired access token is checked for audience,
-  tenant, and the delegated `ThreatHunting.Read.All` scope. This is a fail-fast
-  configuration check, not a substitute for Graph's own signature validation.
+Open a private security advisory on the repository, or contact the maintainer directly. Please
+do not open a public issue for a vulnerability.
 
-## Secrets and storage
+## Design
 
-- Tokens are stored via the OS credential store (Keychain, DPAPI, or Secret Service).
-- The plaintext fallback requires interactive approval at login time and is written as a
-  0600 owner-only file in a 0700 directory.
-- The config file is written atomically as 0600 and never contains a secret.
-- Error messages passing through the auth and HTTP layers are scrubbed of bearer tokens and
-  token-shaped values, and MSAL's own logging is disabled because its callbacks can carry
-  tokens and account identifiers.
+**Read-only by construction.** The only permission requested is delegated
+`ThreatHunting.Read.All`. Microsoft Defender XDR Advanced Hunting is a query API: KQL hunting
+queries cannot create, modify, or delete tenant state. No tool in this plugin writes to your
+tenant.
 
-## Data handling
+**Delegated, never application, permissions.** Queries run as the signed-in user, so Defender
+XDR's own role-based access control applies. The plugin cannot see data the user cannot see. No
+client secret or certificate is used, accepted, or stored — the app registration is a public
+client, and its application ID is not a secret.
 
-- Query output is bounded by timespan, configured row limit, a 25 MiB response ceiling, and
-  a 50 KiB tool-output limit. Truncated output is explicitly marked and left as invalid JSON
-  so a prefix cannot be mistaken for a complete result set.
-- Tenant telemetry is not written to disk by default. `export_results=true` writes the full
-  response to a 0600 file under `~/.config/claude-defender-xdr/exports/`, and the skills
-  instruct Claude to set it only after the user explicitly asks for a local export.
-- Treat all returned Defender telemetry as sensitive. Keep timespans narrow, project only
-  necessary columns, and end queries with a `take`/`top` limit.
-- Report empty results as a lack of matching accessible telemetry, not as proof of absence.
+**Authorization code flow with PKCE.** Sign-in uses the authorization code flow with a
+SHA-256 PKCE challenge against a listener bound to `127.0.0.1` on an ephemeral port. The
+listener is not reachable from the network, exists only for the duration of a sign-in, and
+rejects any callback whose `state` does not match the one generated for that request
+(compared with a constant-time comparison).
 
-## Known considerations
+**Token storage.** Only the refresh token is persisted, to
+`~/.config/claude-defender-xdr/token.json` with mode `0600` inside a `0700` directory. Access
+tokens are held in memory for the life of the server process and are never written to disk. A
+refresh token issued for a different tenant or application ID is discarded rather than used.
+When Microsoft rejects a refresh token, it is deleted immediately instead of being retried.
 
-- `@azure/msal-node-extensions` depends on `keytar`, a native module whose upstream project
-  is archived. It is the reason this plugin needs `npm ci` after installation. Track it when
-  auditing dependencies.
-- KQL is assembled by the model. The skills require every untrusted scalar (usernames,
-  hostnames, URLs, message IDs) to be encoded as a valid KQL string literal and the finished
-  query inspected before execution. The Advanced Hunting API is read-only, which bounds the
-  impact of a malformed or injected query to over-broad reads.
+This is the same posture as the Azure CLI and GitHub CLI: a file readable only by your user
+account. It relies on your OS account being the security boundary. If a local attacker already
+has your user account, they have the token — and independently, they can run this plugin.
 
-## Reporting
+**Token and secret hygiene.** Tokens are never logged. Error messages from Microsoft Graph are
+truncated, stripped of newlines, and scrubbed of `Bearer` values before being shown. The
+plugin has no telemetry and makes no network calls other than to the configured Microsoft
+login and Graph endpoints.
 
-Report suspected vulnerabilities privately to the repository maintainer rather than opening
-a public issue with sensitive details.
+**Endpoint pinning.** The Graph endpoint must be one of the three official Microsoft clouds.
+Its Entra login host is derived from that choice rather than configured separately, so the two
+cannot be pointed at different places, and neither can be aimed at an arbitrary host.
+
+**Bounded output.** Results are capped by a configured maximum row count that a query cannot
+raise, responses over 25 MiB are refused before parsing, and tool output is truncated at 50 KB.
+Full result sets are written to disk only when a user explicitly asks for an export, at mode
+`0600`.
+
+## Supply chain
+
+The server is bundled into a single committed `dist/server.js` with two pure-JavaScript
+dependencies: the Model Context Protocol SDK and Zod. There are no native modules, no
+post-install scripts, and nothing is downloaded or installed at plugin-install time.
+
+## What this plugin does not protect against
+
+Query results are security data, and they flow into a Claude conversation like any other tool
+output. Treat that conversation as holding the same sensitivity as the data you query, and
+apply your organization's policy on what may be sent to a model provider.

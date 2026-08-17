@@ -1,10 +1,9 @@
 ---
-description: Remove the cached Defender XDR account
-allowed-tools: Bash(claude-defender-xdr-logout), Bash(claude-defender-xdr-logout *)
+description: Remove the cached Microsoft Defender XDR sign-in
+allowed-tools: mcp__plugin_defender-xdr_defender-xdr__xdr_logout
 ---
 
-Run `claude-defender-xdr-logout` in the terminal to remove the cached Defender XDR account
-from the local token cache.
+Call the `xdr_logout` tool.
 
-Tell the user this clears local credentials only: it does not revoke the Entra session in
-the browser or sign them out of other applications.
+Tell the user this removes the sign-in cached on this machine only. It does not revoke their
+Entra session in the browser or sign them out of any other application.

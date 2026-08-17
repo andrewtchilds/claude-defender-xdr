@@ -2,7 +2,7 @@
 name: defender-xdr-messaging-investigation
 description: Investigates Defender XDR email and Teams threats. Use for phishing, attachments, URLs, delivery or remediation, Safe Links clicks, campaigns, sender or domain pivots, and recipient impact.
 license: MIT
-compatibility: Requires the claude-defender-xdr plugin and an explicit `claude-defender-xdr-login` (or `/defender-xdr:xdr-login`) sign-in, and access to Defender for Office 365 hunting tables.
+compatibility: Requires the claude-defender-xdr plugin and a Defender XDR sign-in (the `xdr_login` tool, or `/defender-xdr:xdr-login`), and access to Defender for Office 365 hunting tables.
 ---
 
 # Defender XDR Messaging Investigation
