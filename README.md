@@ -1,54 +1,97 @@
 # claude-defender-xdr
 
-A Claude Code plugin that provides read-only Microsoft Defender XDR Advanced Hunting through MCP, plus investigation skills for endpoint, identity, messaging, and cross-domain cases.
+A Claude Code plugin for read-only Microsoft Defender XDR Advanced Hunting: two MCP tools
+plus investigation skills for endpoint, identity, messaging, and cross-domain cases.
 
-## What changed from the pi implementation
+## What it provides
 
-Claude Code has no pi extension API. This package uses the Claude Code primitives that provide the same boundaries:
+| Component | Name | Purpose |
+| --- | --- | --- |
+| MCP tool | `xdr_run_query` | Bounded, read-only KQL against Advanced Hunting via Microsoft Graph |
+| MCP tool | `xdr_get_schema` | List, search, or describe hunting tables from a bundled schema snapshot, optionally verified live against the tenant |
+| Command | `/defender-xdr:xdr-login` | Explicit interactive Entra sign-in |
+| Command | `/defender-xdr:xdr-logout` | Remove the cached account |
+| Skills | `defender-xdr-investigation` and the endpoint, identity, and messaging branches | Evidence funnel, bounded KQL patterns, uncertainty handling, and reporting contract |
 
-- **MCP stdio server**: `xdr_run_query` and `xdr_get_schema` replace pi registered tools.
-- **Skills**: the investigation skills are shipped unchanged in Claude Code's supported `skills/` format.
-- **Plugin commands**: `/defender-xdr:xdr-login` and `/defender-xdr:xdr-logout` invoke explicit terminal helpers for interactive authentication.
-- **No automatic browser login**: the MCP server only acquires cached tokens silently. Authentication is an explicit user action.
-- **Local secure cache**: MSAL uses the OS credential store where available; an unencrypted owner-only fallback requires explicit approval.
+Design boundaries:
+
+- **Read-only.** Only `POST /v1.0/security/runHuntingQuery`, which cannot change tenant state.
+- **No implicit authentication.** MCP tools acquire cached tokens silently and never open a
+  browser. Sign-in is always an explicit user action.
+- **No client secrets.** Delegated public-client flow only; a `clientSecret` in the config
+  file is rejected outright.
+- **Secure token storage.** MSAL uses the OS credential store. An owner-only (0600)
+  plaintext fallback requires interactive approval.
 
 ## Prerequisites
 
-Create a Microsoft Entra app registration with:
+Node.js 20 or newer, and a Microsoft Entra app registration with:
 
-1. **Mobile and desktop applications**, redirect URI `http://localhost`.
+1. A **Mobile and desktop applications** platform with redirect URI `http://localhost`.
 2. Public client flows enabled.
-3. Delegated Microsoft Graph permission `ThreatHunting.Read.All`.
+3. The delegated Microsoft Graph permission `ThreatHunting.Read.All`.
 4. Tenant admin consent.
-5. The tenant ID and client ID.
 
-The signed-in user also needs Defender permissions for the data being queried.
+The signed-in user also needs Defender RBAC covering the data being queried.
 
-## Install/develop
+## Install
+
+This plugin has a native dependency (`keytar`, via `@azure/msal-node-extensions`) for the
+OS credential store, so it needs an `npm install` after the plugin files are in place.
+Claude Code installs plugins by cloning without running a build, so do this once:
 
 ```bash
+git clone <repository-url> claude-defender-xdr
+cd claude-defender-xdr
 npm ci
-npm run build
-claude --plugin-dir .
 ```
 
-For a packaged plugin, install the repository through Claude Code's plugin mechanism. The plugin's `.mcp.json` starts `dist/server/index.js` with the plugin root supplied by Claude Code.
+On Linux, `keytar` also needs `libsecret` (`sudo apt-get install libsecret-1-dev`).
+
+Then load it:
+
+```bash
+claude --plugin-dir /path/to/claude-defender-xdr
+```
+
+Or add the repository through a [plugin marketplace](https://code.claude.com/docs/en/plugin-marketplaces)
+and run `npm ci` inside the installed plugin directory.
+
+`dist/` is committed, so no build step is required to run the plugin. Rebuild it whenever
+you change `server/`; `npm run verify` fails if the two drift apart.
+
+> If `npm ci` has not been run, `xdr_run_query` and sign-in will fail. `xdr_get_schema`
+> still works offline from the bundled snapshot.
 
 ## Sign in
 
-Use `/defender-xdr:xdr-login` or run `npm run build && claude-defender-xdr-login`. The helper opens the browser only for this explicit login action. Configuration defaults to `~/.config/claude-defender-xdr/config.json`; token cache is kept in the same directory.
+Run `/defender-xdr:xdr-login` (or `claude-defender-xdr-login`, which the plugin puts on the
+Bash tool's `PATH` while enabled). It prompts for the tenant and client IDs on first use.
 
-Environment overrides are `CLAUDE_XDR_TENANT_ID`, `CLAUDE_XDR_CLIENT_ID`, `CLAUDE_XDR_API_BASE_URL`, and `CLAUDE_XDR_AUTHORITY_HOST`.
+Configuration lives at `~/.config/claude-defender-xdr/config.json` (or `$XDG_CONFIG_HOME`),
+alongside the token cache. Environment overrides: `CLAUDE_XDR_TENANT_ID`,
+`CLAUDE_XDR_CLIENT_ID`, `CLAUDE_XDR_API_BASE_URL`, `CLAUDE_XDR_AUTHORITY_HOST`.
+
+US Gov (`https://graph.microsoft.us`) and China (`https://microsoftgraph.chinacloudapi.cn`)
+clouds are supported; the authority host must match the chosen cloud.
 
 ## Safety
 
-Queries are read-only and bounded by timespan, configured rows, response size, and MCP output limits. Tenant data is not written to disk by the MCP tool. `export_results` writes the complete API response only when the user explicitly requests it, to an owner-only file under `~/.config/claude-defender-xdr/exports/`. See [SECURITY.md](SECURITY.md).
+Queries are bounded by timespan, configured row limit, a 25 MiB response ceiling, and a
+50 KiB tool-output limit. Truncated output is marked and is deliberately not valid JSON, so
+a prefix cannot be mistaken for a complete result set.
 
-## Skills
+Tenant data is not written to disk unless the user explicitly sets `export_results=true`,
+which writes the full response to an owner-only file under
+`~/.config/claude-defender-xdr/exports/`. See [SECURITY.md](SECURITY.md).
 
-- `defender-xdr-investigation`
-- `defender-xdr-endpoint-investigation`
-- `defender-xdr-identity-investigation`
-- `defender-xdr-messaging-investigation`
+## Develop
 
-The skills reference `xdr_run_query` and `xdr_get_schema`, and preserve the evidence funnel, bounded KQL patterns, uncertainty handling, and reporting contract from the pi package.
+```bash
+npm ci
+npm run verify   # typecheck, tests, rebuild, dist freshness, plugin manifest validation
+```
+
+Layout: `server/` is the MCP server (TypeScript, compiled to `dist/`), `bin/` holds the
+PATH shims Claude Code exposes, `scripts/` the login/logout helpers, `skills/` the
+investigation skills, and `schema-snapshot/` the bundled Advanced Hunting schema.

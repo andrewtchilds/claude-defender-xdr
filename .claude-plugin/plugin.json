@@ -1,8 +1,10 @@
 {
   "name": "defender-xdr",
+  "displayName": "Microsoft Defender XDR",
   "version": "0.1.0",
   "description": "Read-only Microsoft Defender XDR Advanced Hunting tools and investigation skills for Claude Code",
   "author": { "name": "Andrew Childs" },
   "license": "MIT",
-  "mcpServers": "./.mcp.json"
+  "keywords": ["security", "defender", "xdr", "kql", "advanced-hunting", "microsoft", "incident-response"],
+  "mcpServers": "./mcp-config.json"
 }

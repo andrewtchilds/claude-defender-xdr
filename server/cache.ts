@@ -1,9 +1,84 @@
-import { DataProtectionScope, FilePersistence, PersistenceCachePlugin, PersistenceCreator, type IPersistence } from "@azure/msal-node-extensions";
 import { chmod, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type {
+  IPersistence,
+  PersistenceCachePlugin,
+} from "@azure/msal-node-extensions";
 import { getXdrDirectory } from "./config.js";
-export class SecureCacheUnavailableError extends Error { constructor() { super("OS-backed secure token storage is unavailable. Run claude-defender-xdr-login interactively to approve an owner-only unencrypted file cache, or fix the OS keychain/secret service."); this.name = "SecureCacheUnavailableError"; } }
-export interface PersistentCache { cachePlugin: PersistenceCachePlugin; persistence: IPersistence; security: "os-protected" | "owner-only-file"; path: string; }
-async function prepare(path: string) { await mkdir(dirname(path), { recursive: true, mode: 0o700 }); await chmod(dirname(path), 0o700); }
-export async function createPersistentCache(allowUnencryptedFallback: boolean, directory = getXdrDirectory()): Promise<PersistentCache> { const path = join(directory, "msal-cache.bin"); await prepare(path); try { const p = await PersistenceCreator.createPersistence({ cachePath: path, dataProtectionScope: DataProtectionScope.CurrentUser, serviceName: "claude-defender-xdr", accountName: "msal-token-cache", usePlaintextFileOnLinux: false }); if (!(await p.verifyPersistence())) throw new Error("secure persistence verification failed"); await chmod(path, 0o600).catch(() => undefined); return { cachePlugin: new PersistenceCachePlugin(p), persistence: p, security: "os-protected", path }; } catch { if (!allowUnencryptedFallback) throw new SecureCacheUnavailableError(); }
-  const fallbackPath = join(directory, "msal-cache.unencrypted.json"), p = await FilePersistence.create(fallbackPath); await chmod(fallbackPath, 0o600); if (!(await p.verifyPersistence())) throw new Error("Owner-only token cache verification failed"); return { cachePlugin: new PersistenceCachePlugin(p), persistence: p, security: "owner-only-file", path: fallbackPath }; }
+
+export class SecureCacheUnavailableError extends Error {
+  constructor() {
+    super(
+      "OS-backed secure token storage is unavailable. Run claude-defender-xdr-login interactively to approve an owner-only unencrypted file cache, or fix the OS keychain/secret service.",
+    );
+    this.name = "SecureCacheUnavailableError";
+  }
+}
+
+export interface PersistentCache {
+  cachePlugin: PersistenceCachePlugin;
+  persistence: IPersistence;
+  security: "os-protected" | "owner-only-file";
+  path: string;
+}
+
+/**
+ * `@azure/msal-node-extensions` pulls in the native `keytar` binding, which throws at
+ * require-time when its prebuilt binary is missing. Importing it lazily keeps the rest of
+ * the server — notably the offline `xdr_get_schema` tool — usable on such installs.
+ */
+function loadExtensions() {
+  return import("@azure/msal-node-extensions");
+}
+
+async function prepareDirectory(path: string) {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await chmod(dirname(path), 0o700);
+}
+
+/**
+ * Prefers the OS credential store (Keychain / DPAPI / Secret Service). Falls back to a
+ * 0600 plaintext file only when the caller has already obtained explicit user approval.
+ */
+export async function createPersistentCache(
+  allowUnencryptedFallback: boolean,
+  directory = getXdrDirectory(),
+): Promise<PersistentCache> {
+  const securePath = join(directory, "msal-cache.bin");
+  await prepareDirectory(securePath);
+
+  try {
+    const { DataProtectionScope, PersistenceCachePlugin, PersistenceCreator } = await loadExtensions();
+    const persistence = await PersistenceCreator.createPersistence({
+      cachePath: securePath,
+      dataProtectionScope: DataProtectionScope.CurrentUser,
+      serviceName: "claude-defender-xdr",
+      accountName: "msal-token-cache",
+      usePlaintextFileOnLinux: false,
+    });
+    if (!(await persistence.verifyPersistence())) throw new Error("secure persistence verification failed");
+    await chmod(securePath, 0o600).catch(() => undefined);
+    return {
+      cachePlugin: new PersistenceCachePlugin(persistence),
+      persistence,
+      security: "os-protected",
+      path: securePath,
+    };
+  } catch {
+    if (!allowUnencryptedFallback) throw new SecureCacheUnavailableError();
+  }
+
+  const { FilePersistence, PersistenceCachePlugin } = await loadExtensions();
+  const fallbackPath = join(directory, "msal-cache.unencrypted.json");
+  const persistence = await FilePersistence.create(fallbackPath);
+  await chmod(fallbackPath, 0o600);
+  if (!(await persistence.verifyPersistence())) {
+    throw new Error("Owner-only token cache verification failed");
+  }
+  return {
+    cachePlugin: new PersistenceCachePlugin(persistence),
+    persistence,
+    security: "owner-only-file",
+    path: fallbackPath,
+  };
+}

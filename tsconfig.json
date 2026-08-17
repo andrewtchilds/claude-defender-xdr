@@ -6,12 +6,14 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "exactOptionalPropertyTypes": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "types": ["node", "vitest/globals"],
+    "types": ["node"],
     "rootDir": ".",
     "outDir": "dist",
     "sourceMap": true
   },
-  "include": ["server/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"]
+  "include": ["server/**/*.ts"]
 }

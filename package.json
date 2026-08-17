@@ -5,18 +5,31 @@
   "type": "module",
   "license": "MIT",
   "author": "Andrew Childs",
-  "files": [".claude-plugin", ".mcp.json", "commands", "dist", "skills", "schema-snapshot", "scripts", "README.md", "SECURITY.md", "LICENSE"],
+  "files": [
+    ".claude-plugin",
+    "mcp-config.json",
+    "bin",
+    "commands",
+    "dist",
+    "skills",
+    "schema-snapshot",
+    "scripts",
+    "README.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
   "bin": {
     "claude-defender-xdr-login": "scripts/xdr-login.mjs",
     "claude-defender-xdr-logout": "scripts/xdr-logout.mjs"
   },
   "scripts": {
     "build": "tsc",
-    "check": "tsc --noEmit",
+    "check": "tsc --noEmit -p tsconfig.test.json",
     "test": "vitest run",
-    "verify": "npm run check && npm test",
-    "prepack": "npm run build",
-    "postinstall": "npm run build"
+    "verify": "npm run check && npm test && npm run build && npm run check:dist && npm run check:plugin",
+    "check:dist": "git diff --exit-code -- dist || (echo 'dist/ is stale: commit the rebuilt output' && exit 1)",
+    "check:plugin": "claude plugin validate .",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "@azure/msal-node": "5.4.1",
