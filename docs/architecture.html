@@ -1,0 +1,471 @@
+<title>Defender XDR Plugin Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+
+<style>
+  :root {
+    --bg: #F6F7FB;
+    --surface: #FFFFFF;
+    --surface-2: #EEF1F8;
+    --ink: #1A2044;
+    --muted: #61666A;
+    --line: #D8DEEC;
+    --brand: #222E65;
+    --brand-2: #00ADEE;
+    --green: #63BB46;
+    --amber: #FFB81C;
+    --edge: #222E65;
+    --panel: #EDF1F9;
+    --panel-line: #CBD5EC;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0F1330;
+      --surface: #1B2149;
+      --surface-2: #161B3C;
+      --ink: #E9ECF7;
+      --muted: #9AA2C0;
+      --line: #2E3767;
+      --brand: #8FA0EC;
+      --brand-2: #3FC6FF;
+      --green: #7FD05F;
+      --amber: #FFC94A;
+      --edge: #9FB0F0;
+      --panel: #161C42;
+      --panel-line: #2B3467;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0F1330;
+    --surface: #1B2149;
+    --surface-2: #161B3C;
+    --ink: #E9ECF7;
+    --muted: #9AA2C0;
+    --line: #2E3767;
+    --brand: #8FA0EC;
+    --brand-2: #3FC6FF;
+    --green: #7FD05F;
+    --amber: #FFC94A;
+    --edge: #9FB0F0;
+    --panel: #161C42;
+    --panel-line: #2B3467;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: Montserrat, "Helvetica Neue", Arial, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .page {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 56px 24px 72px;
+    display: flex;
+    flex-direction: column;
+    gap: 44px;
+  }
+
+  header { display: flex; flex-direction: column; gap: 14px; }
+
+  .eyebrow {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--brand-2);
+  }
+
+  h1 {
+    margin: 0;
+    font-size: clamp(30px, 4.4vw, 46px);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    text-wrap: balance;
+  }
+
+  .lede {
+    margin: 0;
+    max-width: 66ch;
+    font-size: 17px;
+    color: var(--muted);
+  }
+  .lede strong { color: var(--ink); font-weight: 600; }
+
+  h2 {
+    margin: 0 0 14px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  h2::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+  }
+
+  p { max-width: 68ch; }
+  p.tight { margin: 0 0 14px; }
+
+  figure {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .frame {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px;
+    overflow-x: auto;
+  }
+
+  .frame svg {
+    display: block;
+    width: 100%;
+    min-width: 720px;
+    height: auto;
+  }
+
+  figcaption {
+    font-size: 13.5px;
+    color: var(--muted);
+    max-width: 78ch;
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 22px;
+    font-size: 12px;
+    color: var(--muted);
+    align-items: center;
+  }
+  .legend span { display: inline-flex; align-items: center; gap: 8px; }
+  .swatch { width: 26px; height: 0; border-top-width: 2px; border-top-style: solid; }
+  .swatch.data { border-color: var(--edge); }
+  .swatch.auth { border-color: var(--brand-2); border-top-style: dashed; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 14px;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 16px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .card .name {
+    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--brand);
+  }
+  .card p { margin: 0; font-size: 13.5px; color: var(--muted); }
+
+  ul.facts {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    max-width: 74ch;
+  }
+  ul.facts li {
+    position: relative;
+    padding-left: 24px;
+    font-size: 14.5px;
+    color: var(--muted);
+  }
+  ul.facts li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 9px;
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    background: var(--brand-2);
+  }
+  ul.facts li b { color: var(--ink); font-weight: 600; }
+  ul.facts.ok li::before { background: var(--green); }
+
+  code, .mono {
+    font-family: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.88em;
+  }
+  code {
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 5px;
+  }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding-top: 18px;
+    font-size: 12.5px;
+    color: var(--muted);
+    max-width: 78ch;
+  }
+
+  /* SVG typography */
+  .svg-title { font: 600 15px Montserrat, sans-serif; fill: var(--ink); }
+  .svg-sub { font: 400 11.5px Montserrat, sans-serif; fill: var(--muted); }
+  .svg-mono { font: 400 11.5px "IBM Plex Mono", monospace; fill: var(--muted); }
+  .svg-edge-label { font: 500 11.5px Montserrat, sans-serif; fill: var(--ink); }
+  .svg-zone { font: 700 11px Montserrat, sans-serif; fill: var(--muted); letter-spacing: 0.14em; }
+</style>
+
+<div class="page">
+
+  <header>
+    <div class="eyebrow">Claude Code plugin &middot; v1.0.0</div>
+    <h1>Defender XDR Plugin Architecture</h1>
+    <p class="lede">You ask a question in plain English. Claude writes the KQL, an MCP server on
+    <strong>your own machine</strong> runs it against Advanced Hunting through Microsoft Graph, and the rows come
+    back for Claude to explain. Two calls leave the machine — one to Entra for a token, one to Graph for the
+    query — and <strong>every path is read-only</strong>.</p>
+  </header>
+
+  <section>
+    <h2>The query path</h2>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 1240 570" role="img"
+             aria-label="A question flows from the analyst through Claude Code to a local MCP server, which gets an access token from Microsoft Entra ID and posts one read-only KQL query to Microsoft Graph, which runs it against Defender XDR Advanced Hunting and returns capped rows.">
+          <defs>
+            <marker id="f1-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="var(--edge)"></path>
+            </marker>
+            <marker id="f1-arrow-auth" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="var(--brand-2)"></path>
+            </marker>
+          </defs>
+
+          <!-- zones -->
+          <rect x="24" y="20" width="700" height="530" rx="10" fill="var(--panel)" stroke="var(--panel-line)"></rect>
+          <rect x="760" y="20" width="456" height="530" rx="10" fill="var(--panel)" stroke="var(--panel-line)"></rect>
+          <text class="svg-zone" x="44" y="46">YOUR MACHINE</text>
+          <text class="svg-zone" x="780" y="46">MICROSOFT CLOUD</text>
+          <line x1="742" y1="26" x2="742" y2="544" stroke="var(--muted)" stroke-width="1" stroke-dasharray="2 6" opacity="0.5"></line>
+
+          <!-- boxes: left -->
+          <rect x="56" y="64" width="344" height="56" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
+          <text class="svg-title" x="76" y="88">You</text>
+          <text class="svg-sub" x="76" y="106">an analyst with a question</text>
+
+          <rect x="56" y="152" width="344" height="96" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
+          <text class="svg-title" x="76" y="186">Claude Code</text>
+          <text class="svg-sub" x="76" y="208">4 investigation skills scope the hunt</text>
+          <text class="svg-sub" x="76" y="226">and shape the KQL that gets written</text>
+
+          <rect x="56" y="296" width="344" height="96" rx="7" fill="var(--surface)" stroke="var(--brand-2)" stroke-width="2"></rect>
+          <text class="svg-title" x="76" y="330">defender-xdr MCP server</text>
+          <text class="svg-mono" x="76" y="352">node dist/server.js &middot; stdio</text>
+          <text class="svg-sub" x="76" y="370">the only piece that talks to Microsoft</text>
+
+          <rect x="56" y="440" width="344" height="84" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
+          <text class="svg-mono" x="76" y="470" style="font-size:12.5px; fill:var(--ink); font-weight:500;">~/.config/claude-defender-xdr</text>
+          <text class="svg-sub" x="76" y="492">token.json &middot; config.json &mdash; mode 0600</text>
+          <text class="svg-sub" x="76" y="510">exports/ written only when you ask</text>
+
+          <rect x="460" y="440" width="228" height="84" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
+          <text class="svg-title" x="480" y="470">Schema snapshot</text>
+          <text class="svg-sub" x="480" y="492">64 hunting tables</text>
+          <text class="svg-sub" x="480" y="510">bundled &middot; no network</text>
+
+          <!-- boxes: right -->
+          <rect x="792" y="152" width="392" height="84" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
+          <text class="svg-title" x="812" y="182">Microsoft Entra ID</text>
+          <text class="svg-sub" x="812" y="204">auth code + PKCE &middot; public client, no secret</text>
+          <text class="svg-sub" x="812" y="222">delegated ThreatHunting.Read.All</text>
+
+          <rect x="792" y="296" width="392" height="96" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
+          <text class="svg-title" x="812" y="330">Microsoft Graph</text>
+          <text class="svg-mono" x="812" y="352">POST /v1.0/security/runHuntingQuery</text>
+          <text class="svg-sub" x="812" y="370">one call per query &middot; retries on 429 and 5xx</text>
+
+          <rect x="792" y="440" width="392" height="84" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
+          <text class="svg-title" x="812" y="470">Defender XDR Advanced Hunting</text>
+          <text class="svg-sub" x="812" y="492">read-only KQL over tenant telemetry</text>
+          <text class="svg-sub" x="812" y="510">your Defender role decides what you see</text>
+
+          <!-- edges -->
+          <line x1="228" y1="120" x2="228" y2="146" stroke="var(--edge)" stroke-width="1.6" marker-end="url(#f1-arrow)"></line>
+          <text class="svg-edge-label" x="240" y="139">a question in plain English</text>
+
+          <line x1="228" y1="248" x2="228" y2="290" stroke="var(--edge)" stroke-width="1.6" marker-end="url(#f1-arrow)"></line>
+          <text class="svg-edge-label" x="240" y="274">xdr_run_query &middot; stdio</text>
+
+          <polyline points="400,312 440,312 440,194 782,194" fill="none" stroke="var(--brand-2)" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#f1-arrow-auth)"></polyline>
+          <text class="svg-edge-label" x="595" y="186" text-anchor="middle">refresh token &rarr; access token (~1 h, in memory)</text>
+
+          <line x1="400" y1="330" x2="782" y2="330" stroke="var(--edge)" stroke-width="1.6" marker-end="url(#f1-arrow)"></line>
+          <text class="svg-edge-label" x="591" y="322" text-anchor="middle">query + Bearer token</text>
+
+          <line x1="792" y1="360" x2="408" y2="360" stroke="var(--edge)" stroke-width="1.6" marker-end="url(#f1-arrow)"></line>
+          <text class="svg-edge-label" x="600" y="378" text-anchor="middle">rows &mdash; capped at max_rows, &le; 50 KB</text>
+
+          <line x1="150" y1="392" x2="150" y2="434" stroke="var(--edge)" stroke-width="1.6" marker-end="url(#f1-arrow)" marker-start="url(#f1-arrow)"></line>
+          <text class="svg-edge-label" x="164" y="418">reads / writes token.json</text>
+
+          <polyline points="330,392 330,420 574,420 574,434" fill="none" stroke="var(--edge)" stroke-width="1.6" marker-end="url(#f1-arrow)"></polyline>
+          <text class="svg-edge-label" x="452" y="411" text-anchor="middle">xdr_get_schema &mdash; no network</text>
+
+          <line x1="940" y1="392" x2="940" y2="434" stroke="var(--edge)" stroke-width="1.6" marker-end="url(#f1-arrow)"></line>
+          <text class="svg-edge-label" x="930" y="418" text-anchor="end">runs the query</text>
+
+          <line x1="1040" y1="434" x2="1040" y2="398" stroke="var(--edge)" stroke-width="1.6" marker-end="url(#f1-arrow)"></line>
+          <text class="svg-edge-label" x="1052" y="418">result rows</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i class="swatch data"></i> query and data</span>
+        <span><i class="swatch auth"></i> tokens and sign-in</span>
+      </div>
+      <figcaption>One question, one round trip. Claude never touches Microsoft directly &mdash; it calls a tool on a
+      local MCP server over stdio, and that server holds the token, makes the single Graph call, and trims what comes
+      back before it reaches the model. <b>Nothing in this path can change tenant state.</b></figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>The four tools</h2>
+    <div class="grid">
+      <div class="card">
+        <span class="name">xdr_run_query</span>
+        <p>Runs one read-only KQL query and returns the rows. Takes a timespan and a row limit; the configured
+        ceiling cannot be raised per call.</p>
+      </div>
+      <div class="card">
+        <span class="name">xdr_get_schema</span>
+        <p>Lists, searches, or describes hunting tables from a snapshot compiled into the server. No network, no
+        sign-in required.</p>
+      </div>
+      <div class="card">
+        <span class="name">xdr_login</span>
+        <p>Opens your browser for the Microsoft sign-in, and saves the tenant and client IDs if they were missing.
+        Normally needed once.</p>
+      </div>
+      <div class="card">
+        <span class="name">xdr_logout</span>
+        <p>Deletes the sign-in cached on this machine. The browser session with Microsoft is left untouched.</p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>The skills layer</h2>
+    <p class="tight">The tools are only half of it. The plugin also installs four investigation skills &mdash; a
+    cross-domain core plus endpoint, identity, and messaging branches. They are instructions, not code: they load
+    into Claude's context and govern <em>how</em> it hunts, not what the server will run.</p>
+    <ul class="facts">
+      <li><b>Evidence funnel.</b> Frame the decision, measure cheaply, then retrieve only the smallest decisive
+      records &mdash; instead of dumping raw events.</li>
+      <li><b>Cheapest table first,</b> then pivot on indicators &mdash; a hash, an IP, a sender &mdash; rather than
+      widening the time window.</li>
+      <li><b>Read-only by contract.</b> The skills route every operational change into recommendations, because the
+      plugin cannot make one.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Signing in, once</h2>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 1240 300" role="img"
+             aria-label="Sign-in flow: Claude Code calls xdr_login, the MCP server starts a loopback listener and opens the system browser, the user signs in to Microsoft Entra ID with MFA, and Entra returns an auth code to localhost which the server exchanges with its PKCE verifier for a refresh token stored at mode 0600.">
+          <defs>
+            <marker id="f2-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="var(--brand-2)"></path>
+            </marker>
+          </defs>
+
+          <rect x="40" y="60" width="200" height="90" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
+          <text class="svg-title" x="60" y="92">Claude Code</text>
+          <text class="svg-sub" x="60" y="114">calls xdr_login, or you</text>
+          <text class="svg-sub" x="60" y="131">run the slash command</text>
+
+          <rect x="360" y="60" width="200" height="90" rx="7" fill="var(--surface)" stroke="var(--brand-2)" stroke-width="2"></rect>
+          <text class="svg-title" x="380" y="92">MCP server</text>
+          <text class="svg-sub" x="380" y="114">PKCE challenge and a</text>
+          <text class="svg-sub" x="380" y="131">listener on 127.0.0.1</text>
+
+          <rect x="680" y="60" width="200" height="90" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
+          <text class="svg-title" x="700" y="92">System browser</text>
+          <text class="svg-sub" x="700" y="114">your normal Microsoft</text>
+          <text class="svg-sub" x="700" y="131">sign-in, MFA included</text>
+
+          <rect x="1000" y="60" width="200" height="90" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
+          <text class="svg-title" x="1020" y="92">Microsoft Entra ID</text>
+          <text class="svg-sub" x="1020" y="114">issues the auth code,</text>
+          <text class="svg-sub" x="1020" y="131">then the tokens</text>
+
+          <line x1="240" y1="105" x2="352" y2="105" stroke="var(--brand-2)" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#f2-arrow)"></line>
+          <text class="svg-edge-label" x="296" y="95" text-anchor="middle">starts sign-in</text>
+
+          <line x1="560" y1="105" x2="672" y2="105" stroke="var(--brand-2)" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#f2-arrow)"></line>
+          <text class="svg-edge-label" x="616" y="95" text-anchor="middle">opens browser</text>
+
+          <line x1="880" y1="105" x2="992" y2="105" stroke="var(--brand-2)" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#f2-arrow)"></line>
+          <text class="svg-edge-label" x="936" y="95" text-anchor="middle">sign in + MFA</text>
+
+          <polyline points="1100,152 1100,210 460,210 460,158" fill="none" stroke="var(--brand-2)" stroke-width="1.6" stroke-dasharray="6 4" marker-end="url(#f2-arrow)"></polyline>
+          <text class="svg-edge-label" x="780" y="234" text-anchor="middle">auth code returned to http://localhost:&lt;port&gt;</text>
+          <text class="svg-sub" x="780" y="252" text-anchor="middle">exchanged with the PKCE verifier &middot; refresh token saved to token.json, mode 0600</text>
+        </svg>
+      </div>
+      <figcaption>An authorization-code flow with PKCE against a loopback listener on an ephemeral port. There is no
+      client secret and no device code &mdash; which is why sign-in can happen inside a tool call, with no terminal.
+      After this, queries refresh silently until Microsoft expires or revokes the grant.</figcaption>
+    </figure>
+  </section>
+
+  <section>
+    <h2>Guardrails</h2>
+    <ul class="facts ok">
+      <li><b>One permission.</b> Delegated <code>ThreatHunting.Read.All</code>. Advanced Hunting cannot modify the
+      tenant, and your own Defender role still bounds what you can see.</li>
+      <li><b>A ceiling Claude cannot raise.</b> <code>max_rows</code> (1000 by default) is applied as a minimum
+      against whatever the model asks for, and tool output is truncated at 50 KB with a visible notice.</li>
+      <li><b>Bounded requests.</b> Four-minute wall clock, three attempts with <code>Retry-After</code> honoured,
+      25 MiB response cap.</li>
+      <li><b>Local secrets stay local.</b> The refresh token lives in an owner-only file; bearer tokens are redacted
+      out of error text before it ever reaches the model.</li>
+      <li><b>Full result sets are opt-in.</b> Complete rows are written to <code>exports/</code> only when you
+      explicitly ask for them.</li>
+    </ul>
+  </section>
+
+  <footer>
+    Drawn from the installed plugin source at v1.0.0 &mdash; <span class="mono">src/server.ts</span>,
+    <span class="mono">src/auth.ts</span>, <span class="mono">src/graph.ts</span>, and the bundled schema snapshot
+    dated 13 April 2026 (64 tables: 42 active, 19 preview, 3 retired).
+  </footer>
+
+</div>

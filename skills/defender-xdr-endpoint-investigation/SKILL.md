@@ -2,7 +2,7 @@
 name: defender-xdr-endpoint-investigation
 description: Investigates Defender XDR endpoint activity. Use for malware, process trees, files, network connections, registry persistence, device logons, lateral movement, hashes, IPs, or host scoping.
 license: MIT
-compatibility: Requires the claude-defender-xdr plugin and an explicit `claude-defender-xdr-login` (or `/defender-xdr:xdr-login`) sign-in, and access to Defender for Endpoint hunting tables.
+compatibility: Requires the claude-defender-xdr plugin and a Defender XDR sign-in (the `xdr_login` tool, or `/defender-xdr:xdr-login`), and access to Defender for Endpoint hunting tables.
 ---
 
 # Defender XDR Endpoint Investigation

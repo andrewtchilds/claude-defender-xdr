@@ -1,8 +1,67 @@
 {
   "name": "defender-xdr",
-  "version": "0.1.0",
-  "description": "Read-only Microsoft Defender XDR Advanced Hunting tools and investigation skills for Claude Code",
-  "author": { "name": "Andrew Childs" },
+  "displayName": "Microsoft Defender XDR",
+  "version": "1.0.0",
+  "description": "Ask questions in plain English and get answers from Microsoft Defender XDR Advanced Hunting",
+  "author": {
+    "name": "Andrew Childs"
+  },
   "license": "MIT",
-  "mcpServers": "./.mcp.json"
+  "keywords": [
+    "security",
+    "defender",
+    "xdr",
+    "kql",
+    "advanced-hunting",
+    "microsoft",
+    "incident-response"
+  ],
+  "userConfig": {
+    "tenant_id": {
+      "type": "string",
+      "title": "Entra tenant ID",
+      "description": "GUID of your Microsoft Entra tenant, from the Entra admin center under Overview. Optional here: leave it blank and /defender-xdr:xdr-login will ask for it and save it."
+    },
+    "client_id": {
+      "type": "string",
+      "title": "Entra application (client) ID",
+      "description": "GUID of an app registration with 'Allow public client flows' enabled, a redirect URI of http://localhost, and admin-consented delegated Microsoft Graph ThreatHunting.Read.All. This is not a secret; client secrets are never used. Optional here: /defender-xdr:xdr-login will ask for it and save it."
+    },
+    "graph_base_url": {
+      "type": "string",
+      "title": "Microsoft Graph endpoint",
+      "description": "Change only for sovereign clouds: https://graph.microsoft.us (US Gov) or https://microsoftgraph.chinacloudapi.cn (China).",
+      "default": "https://graph.microsoft.com"
+    },
+    "max_rows": {
+      "type": "number",
+      "title": "Maximum rows per query",
+      "description": "Ceiling on the number of rows returned to Claude.",
+      "default": 1000,
+      "min": 1,
+      "max": 10000
+    },
+    "default_timespan": {
+      "type": "string",
+      "title": "Default lookback window",
+      "description": "Used when a question does not imply a time range, such as 7d or 24h.",
+      "default": "7d"
+    }
+  },
+  "mcpServers": {
+    "defender-xdr": {
+      "type": "stdio",
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/dist/server.js"
+      ],
+      "env": {
+        "XDR_TENANT_ID": "${user_config.tenant_id}",
+        "XDR_CLIENT_ID": "${user_config.client_id}",
+        "XDR_GRAPH_BASE_URL": "${user_config.graph_base_url}",
+        "XDR_MAX_ROWS": "${user_config.max_rows}",
+        "XDR_DEFAULT_TIMESPAN": "${user_config.default_timespan}"
+      }
+    }
+  }
 }
