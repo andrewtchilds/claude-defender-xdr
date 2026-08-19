@@ -27,6 +27,9 @@ indicators rather than dumping raw events.
 Everything is read-only. Advanced Hunting cannot modify tenant state, and the only permission
 requested is the read-only `ThreatHunting.Read.All`.
 
+[`docs/architecture.html`](docs/architecture.html) diagrams how the pieces fit together: the
+query path, the sign-in flow, and the guardrails.
+
 ## Setup
 
 ### 1. Create an Entra app registration
