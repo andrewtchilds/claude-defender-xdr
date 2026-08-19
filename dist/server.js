@@ -21093,7 +21093,6 @@ var StdioServerTransport = class {
 
 // src/server.ts
 import { randomUUID } from "node:crypto";
-import { chmod as chmod3, mkdir as mkdir3, writeFile as writeFile3 } from "node:fs/promises";
 import { join as join3 } from "node:path";
 
 // node_modules/zod/v3/helpers/util.js
@@ -29032,12 +29031,12 @@ var EMPTY_COMPLETION_RESULT = {
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
-import { chmod as chmod2, mkdir as mkdir2, readFile, rm, writeFile as writeFile2 } from "node:fs/promises";
+import { readFile, rm as rm2 } from "node:fs/promises";
 import { join as join2 } from "node:path";
 
 // src/config.ts
 import { readFileSync } from "node:fs";
-import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 var GRAPH_CLOUDS = /* @__PURE__ */ new Map([
@@ -29047,12 +29046,39 @@ var GRAPH_CLOUDS = /* @__PURE__ */ new Map([
 ]);
 var GRAPH_SCOPE = "ThreatHunting.Read.All";
 var RESERVED_SCOPES = ["offline_access", "openid", "profile"];
-function stateDir(env = process.env) {
-  const base = env.XDG_CONFIG_HOME || join(env.HOME || homedir(), ".config");
+function stateDir(env = process.env, platform = process.platform) {
+  const base = env.XDG_CONFIG_HOME || (platform === "win32" ? env.APPDATA || join(env.USERPROFILE || homedir(), "AppData", "Roaming") : join(env.HOME || homedir(), ".config"));
   return join(base, "claude-defender-xdr");
 }
 function configPath(env = process.env) {
   return join(stateDir(env), "config.json");
+}
+var POSIX_MODES = process.platform !== "win32";
+var DIR_MODE = 448;
+var FILE_MODE = 384;
+async function makeOwnerOnlyDir(path) {
+  await mkdir(path, { recursive: true, ...POSIX_MODES ? { mode: DIR_MODE } : {} });
+  if (POSIX_MODES) await chmod(path, DIR_MODE).catch(() => void 0);
+}
+async function writeOwnerOnlyFile(path, contents) {
+  await writeFile(path, contents, { encoding: "utf8", ...POSIX_MODES ? { mode: FILE_MODE } : {} });
+  if (POSIX_MODES) await chmod(path, FILE_MODE).catch(() => void 0);
+}
+async function replaceFile(temp, path) {
+  const transient = /* @__PURE__ */ new Set(["EPERM", "EBUSY", "EACCES"]);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(temp, path);
+      return;
+    } catch (error46) {
+      const { code } = error46;
+      if (attempt >= 4 || !code || !transient.has(code)) {
+        await rm(temp, { force: true }).catch(() => void 0);
+        throw error46;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
 }
 var NotConfiguredError = class extends Error {
   constructor(missing) {
@@ -29102,15 +29128,12 @@ async function saveStoredConfig(values, env = process.env) {
     tenantId: guid3(values.tenantId, "tenant ID"),
     clientId: guid3(values.clientId, "application (client) ID")
   };
-  const directory = stateDir(env);
-  await mkdir(directory, { recursive: true, mode: 448 });
-  await chmod(directory, 448).catch(() => void 0);
+  await makeOwnerOnlyDir(stateDir(env));
   const path = configPath(env);
   const temp = `${path}.${process.pid}.tmp`;
-  await writeFile(temp, `${JSON.stringify(stored, null, 2)}
-`, { encoding: "utf8", mode: 384 });
-  await chmod(temp, 384).catch(() => void 0);
-  await rename(temp, path);
+  await writeOwnerOnlyFile(temp, `${JSON.stringify(stored, null, 2)}
+`);
+  await replaceFile(temp, path);
   return path;
 }
 function loadConfig(env = process.env, stored = readStoredConfig(env)) {
@@ -29172,27 +29195,41 @@ async function readStoredToken(config2) {
   }
 }
 async function writeStoredToken(token) {
-  const directory = stateDir();
-  await mkdir2(directory, { recursive: true, mode: 448 });
-  await chmod2(directory, 448).catch(() => void 0);
-  const path = tokenPath();
-  await writeFile2(path, `${JSON.stringify(token, null, 2)}
-`, { encoding: "utf8", mode: 384 });
-  await chmod2(path, 384).catch(() => void 0);
+  await makeOwnerOnlyDir(stateDir());
+  await writeOwnerOnlyFile(tokenPath(), `${JSON.stringify(token, null, 2)}
+`);
 }
 async function clearStoredToken() {
   try {
-    await rm(tokenPath());
+    await rm2(tokenPath());
     return true;
   } catch {
     return false;
   }
 }
+function browserOpeners(platform, url2) {
+  switch (platform) {
+    case "darwin":
+      return [["open", [url2]]];
+    case "win32":
+      return [
+        ["explorer.exe", [url2]],
+        ["rundll32.exe", ["url.dll,FileProtocolHandler", url2]]
+      ];
+    default:
+      return [["xdg-open", [url2]]];
+  }
+}
 function openBrowser(url2) {
-  const [command, args] = process.platform === "darwin" ? ["open", [url2]] : process.platform === "win32" ? ["cmd", ["/c", "start", "", url2]] : ["xdg-open", [url2]];
-  const child = spawn(command, args, { stdio: "ignore", detached: true });
-  child.on("error", () => void 0);
-  child.unref();
+  const openers = browserOpeners(process.platform, url2);
+  const attempt = (index) => {
+    const opener = openers[index];
+    if (!opener) return;
+    const child = spawn(opener[0], opener[1], { stdio: "ignore", detached: true });
+    child.on("error", () => attempt(index + 1));
+    child.unref();
+  };
+  attempt(0);
 }
 function tokenEndpoint(config2) {
   return `${config2.loginBaseUrl}/${config2.tenantId}/oauth2/v2.0/token`;
@@ -38124,12 +38161,10 @@ function stripAnnotations(row) {
 }
 async function exportResults(payload) {
   const directory = join3(stateDir(), "exports");
-  await mkdir3(directory, { recursive: true, mode: 448 });
-  await chmod3(directory, 448).catch(() => void 0);
+  await makeOwnerOnlyDir(directory);
   const path = join3(directory, `hunting-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}-${randomUUID()}.json`);
-  await writeFile3(path, `${JSON.stringify(payload, null, 2)}
-`, { encoding: "utf8", mode: 384 });
-  await chmod3(path, 384).catch(() => void 0);
+  await writeOwnerOnlyFile(path, `${JSON.stringify(payload, null, 2)}
+`);
   return path;
 }
 function createServer2() {

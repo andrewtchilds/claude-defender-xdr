@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -38,14 +38,76 @@ export interface StoredConfig {
   clientId?: string;
 }
 
-/** Owner-only directory holding the refresh token and any exported result files. */
-export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
-  const base = env.XDG_CONFIG_HOME || join(env.HOME || homedir(), ".config");
+/**
+ * Directory holding the refresh token and any exported result files.
+ *
+ * Each platform gets the location its own tools use: `%APPDATA%` on Windows, the XDG config
+ * directory everywhere else. Both sit inside the user's profile, which is what keeps the
+ * contents private on Windows, where there are no POSIX modes to set.
+ */
+export function stateDir(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const base =
+    env.XDG_CONFIG_HOME ||
+    (platform === "win32"
+      ? env.APPDATA || join(env.USERPROFILE || homedir(), "AppData", "Roaming")
+      : join(env.HOME || homedir(), ".config"));
   return join(base, "claude-defender-xdr");
 }
 
 export function configPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(stateDir(env), "config.json");
+}
+
+/**
+ * Windows has no POSIX file modes: `chmod` there only toggles the read-only flag, and the
+ * `mode` passed to `mkdir` and `writeFile` is ignored outright. Rather than set modes that
+ * mean nothing, this state lives under the user's profile directory, whose ACL already
+ * limits it to that account — the same posture the Azure CLI takes.
+ */
+const POSIX_MODES = process.platform !== "win32";
+const DIR_MODE = 0o700;
+const FILE_MODE = 0o600;
+
+/** Creates a directory that only its owner can enter. */
+export async function makeOwnerOnlyDir(path: string): Promise<void> {
+  await mkdir(path, { recursive: true, ...(POSIX_MODES ? { mode: DIR_MODE } : {}) });
+  if (POSIX_MODES) await chmod(path, DIR_MODE).catch(() => undefined);
+}
+
+/**
+ * Writes a file that only its owner can read. The explicit `chmod` matters because the
+ * `mode` on `writeFile` applies only when the file is created, and is masked by the umask.
+ */
+export async function writeOwnerOnlyFile(path: string, contents: string): Promise<void> {
+  await writeFile(path, contents, { encoding: "utf8", ...(POSIX_MODES ? { mode: FILE_MODE } : {}) });
+  if (POSIX_MODES) await chmod(path, FILE_MODE).catch(() => undefined);
+}
+
+/**
+ * Moves a freshly written temp file over its destination.
+ *
+ * POSIX replaces the target silently. On Windows the same call can fail transiently while a
+ * virus scanner or the search indexer still holds one of the files open, which surfaces as
+ * EPERM, EBUSY, or EACCES, so a locked moment is retried rather than reported as a failure.
+ */
+async function replaceFile(temp: string, path: string): Promise<void> {
+  const transient = new Set(["EPERM", "EBUSY", "EACCES"]);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await rename(temp, path);
+      return;
+    } catch (error) {
+      const { code } = error as NodeJS.ErrnoException;
+      if (attempt >= 4 || !code || !transient.has(code)) {
+        await rm(temp, { force: true }).catch(() => undefined);
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 50 * (attempt + 1)));
+    }
+  }
 }
 
 export class NotConfiguredError extends Error {
@@ -125,15 +187,12 @@ export async function saveStoredConfig(
     tenantId: guid(values.tenantId, "tenant ID"),
     clientId: guid(values.clientId, "application (client) ID"),
   };
-  const directory = stateDir(env);
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await chmod(directory, 0o700).catch(() => undefined);
+  await makeOwnerOnlyDir(stateDir(env));
 
   const path = configPath(env);
   const temp = `${path}.${process.pid}.tmp`;
-  await writeFile(temp, `${JSON.stringify(stored, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  await chmod(temp, 0o600).catch(() => undefined);
-  await rename(temp, path);
+  await writeOwnerOnlyFile(temp, `${JSON.stringify(stored, null, 2)}\n`);
+  await replaceFile(temp, path);
   return path;
 }
 

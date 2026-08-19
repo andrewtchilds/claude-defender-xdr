@@ -87,10 +87,28 @@ describe("loadConfig", () => {
     expect(loadConfig({ ...valid, XDR_DEFAULT_TIMESPAN: "last tuesday" }, none).defaultTimespan).toBe("7d");
   });
 
+  // Paths are compared through join() so the cases hold on Windows separators too.
   it("keeps state under the user's config directory", () => {
-    expect(stateDir({ HOME: "/home/a" } as NodeJS.ProcessEnv)).toBe("/home/a/.config/claude-defender-xdr");
-    expect(stateDir({ XDG_CONFIG_HOME: "/xdg" } as NodeJS.ProcessEnv)).toBe("/xdg/claude-defender-xdr");
-    expect(configPath({ XDG_CONFIG_HOME: "/xdg" } as NodeJS.ProcessEnv)).toBe("/xdg/claude-defender-xdr/config.json");
+    expect(stateDir({ HOME: "/home/a" } as NodeJS.ProcessEnv, "linux")).toBe(
+      join("/home/a", ".config", "claude-defender-xdr"),
+    );
+    expect(stateDir({ XDG_CONFIG_HOME: "/xdg" } as NodeJS.ProcessEnv, "darwin")).toBe(
+      join("/xdg", "claude-defender-xdr"),
+    );
+    expect(configPath({ XDG_CONFIG_HOME: "/xdg" } as NodeJS.ProcessEnv)).toBe(
+      join("/xdg", "claude-defender-xdr", "config.json"),
+    );
+  });
+
+  it("keeps state under %APPDATA% on Windows, not a dotfile in the profile root", () => {
+    const roaming = "C:\\Users\\a\\AppData\\Roaming";
+    expect(stateDir({ APPDATA: roaming } as NodeJS.ProcessEnv, "win32")).toBe(
+      join(roaming, "claude-defender-xdr"),
+    );
+    // A stripped environment can be missing APPDATA, so the profile is the fallback.
+    expect(stateDir({ USERPROFILE: "C:\\Users\\a" } as NodeJS.ProcessEnv, "win32")).toBe(
+      join("C:\\Users\\a", "AppData", "Roaming", "claude-defender-xdr"),
+    );
   });
 });
 
@@ -117,7 +135,8 @@ describe("the saved sign-in identity", () => {
     expect(loadConfig({ ...env, XDR_TENANT_ID: "" }, readStoredConfig(env)).tenantId).toBe(TENANT);
   });
 
-  it("is written owner-only, since it names the tenant", async () => {
+  // Windows has no POSIX modes; there the profile directory's ACL is the boundary instead.
+  it.skipIf(process.platform === "win32")("is written owner-only, since it names the tenant", async () => {
     const path = await saveStoredConfig({ tenantId: TENANT, clientId: CLIENT }, env);
     const { mode } = await import("node:fs").then(fs => fs.promises.stat(path));
     expect(mode & 0o777).toBe(0o600);

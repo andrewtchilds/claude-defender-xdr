@@ -11,7 +11,7 @@
     "check": "tsc --noEmit",
     "test": "vitest run",
     "verify": "npm run check && npm test && npm run build && npm run check:dist && npm run check:plugin",
-    "check:dist": "git diff --exit-code -- dist || (echo 'dist/ is stale: run npm run build and commit' && exit 1)",
+    "check:dist": "git diff --exit-code -- dist || node -e \"console.error('dist/ is stale: run npm run build and commit dist/'); process.exit(1)\"",
     "check:plugin": "claude plugin validate ."
   },
   "dependencies": {

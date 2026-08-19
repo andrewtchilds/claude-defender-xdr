@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { Authenticator, NotSignedInError } from "../src/auth.js";
+import { Authenticator, browserOpeners, NotSignedInError } from "../src/auth.js";
 import type { Config } from "../src/config.js";
 
 const config = {
@@ -59,5 +59,22 @@ describe("accessTokenReady", () => {
     silent.mockRejectedValue(new Error("Microsoft Graph is unreachable"));
     await expect(auth.accessTokenReady()).rejects.toThrow(/unreachable/);
     expect(signIn).not.toHaveBeenCalled();
+  });
+});
+
+describe("browserOpeners", () => {
+  const url = "https://login.microsoftonline.com/t/oauth2/v2.0/authorize?client_id=c&state=s&scope=a%20b";
+
+  it.each(["darwin", "win32", "linux"] as NodeJS.Platform[])("has a launcher for %s", platform => {
+    expect(browserOpeners(platform, url).length).toBeGreaterThan(0);
+  });
+
+  // The authorize URL is full of `&`. Passed to a shell it would be split into commands and
+  // the browser would open a truncated URL, so it has to survive as one whole argument.
+  it.each(["darwin", "win32", "linux"] as NodeJS.Platform[])("passes the URL unshelled on %s", platform => {
+    for (const [command, args] of browserOpeners(platform, url)) {
+      expect(command).not.toMatch(/^(cmd|sh|bash|zsh|powershell|pwsh)/i);
+      expect(args).toContain(url);
+    }
   });
 });

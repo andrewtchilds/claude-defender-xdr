@@ -15,10 +15,10 @@ The plugin adds four tools to Claude Code:
 
 | Tool | Purpose |
 | --- | --- |
-| `xdr_login` | Opens your browser to sign in. Optional — querying signs you in on its own. |
-| `xdr_logout` | Removes the sign-in cached on this machine. |
 | `xdr_run_query` | Runs a read-only KQL query against Advanced Hunting. |
 | `xdr_get_schema` | Looks up hunting tables and columns. Works without signing in. |
+| `xdr_login` | Opens your browser to sign in. Optional — querying signs you in on its own. |
+| `xdr_logout` | Removes the sign-in cached on this machine. |
 
 It also installs four investigation skills — cross-domain, endpoint, identity, and messaging —
 that teach Claude how to scope an investigation, pick the cheapest table, and pivot on
@@ -27,8 +27,8 @@ indicators rather than dumping raw events.
 Everything is read-only. Advanced Hunting cannot modify tenant state, and the only permission
 requested is the read-only `ThreatHunting.Read.All`.
 
-[`docs/architecture.html`](docs/architecture.html) diagrams how the pieces fit together: the
-query path, the sign-in flow, and the guardrails.
+[`docs/architecture.md`](docs/architecture.md) diagrams how the pieces fit together: the query
+path, the sign-in flow, and the guardrails.
 
 ## Setup
 
@@ -47,40 +47,30 @@ Then on the app you just created:
   → add **ThreatHunting.Read.All** → then **Grant admin consent**
 
 Copy the **Directory (tenant) ID** and **Application (client) ID** from the Overview page.
-Neither is a secret. This plugin never uses a client secret.
+Neither is a secret, and this plugin never uses a client secret.
 
 Each person who uses the plugin also needs a Defender XDR role that permits Advanced Hunting.
 The app registration grants the app's ability to ask; their role decides what they can see.
 
-### 2. Add the marketplace
+### 2. Install the plugin
 
-In Claude Code, add this repository as a plugin marketplace:
+In Claude Code:
 
 ```
 /plugin marketplace add andrewtchilds/claude-defender-xdr
+/plugin install defender-xdr@claude-defender-xdr
 ```
 
-This registers the catalog. Nothing is installed yet.
+Or run `/plugin`, pick **defender-xdr** on the **Discover** tab, and choose a scope — **User**
+for yourself, **Project** to share it with a repository, **Local** for this repository only.
+The details pane's **Will install** list names every tool, skill, and MCP server the plugin
+adds before you agree to it.
 
-### 3. Install the plugin
+Claude Code then offers to collect the tenant ID and application ID. Both are optional here:
+whatever you leave blank, sign-in asks for and saves. If the install summary says
+`Run /reload-plugins to activate.`, run that.
 
-Run `/plugin` to open the plugin manager, a tabbed panel you move through with **Tab**:
-
-1. Go to the **Discover** tab and select **defender-xdr**.
-2. Review the details pane. **Will install** lists every tool, skill, and MCP server the
-   plugin adds, so you can see exactly what you are getting before you agree to it.
-3. Press **Enter** and choose a scope — **User** for yourself across all projects,
-   **Project** to share it with everyone on a repository, **Local** for this repository only.
-
-Claude Code then offers to collect the tenant ID and application ID. Both are optional here;
-whatever you leave blank, sign-in asks for and saves.
-
-If the install summary says `Run /reload-plugins to activate.`, run that. If you would rather
-not use the panel, `/plugin install defender-xdr@claude-defender-xdr` does the same thing, and
-the [Claude desktop app](https://code.claude.com/docs/en/desktop#install-plugins) has its own
-plugin browser.
-
-### 4. Ask a question
+### 3. Ask a question
 
 There is no separate sign-in step. Ask something:
 
@@ -101,14 +91,6 @@ restart.
 
 ## Configuration
 
-Settings live in the **Installed** tab of `/plugin`, or in `/plugin configure defender-xdr`
-where that dialog is available. The two identifiers can be set — and changed — through sign-in
-instead, which works everywhere:
-
-```
-/defender-xdr:xdr-login
-```
-
 | Setting | Default | Notes |
 | --- | --- | --- |
 | Entra tenant ID | — | Required. Set at install, or by sign-in. |
@@ -117,19 +99,20 @@ instead, which works everywhere:
 | Maximum rows per query | 1000 | A hard ceiling; Claude cannot raise it per query. |
 | Default lookback window | `7d` | Used when your question implies no time range. |
 
-For US Gov or China clouds, set the Graph endpoint to `https://graph.microsoft.us` or
-`https://microsoftgraph.chinacloudapi.cn`. The matching Entra login host is selected
-automatically, so the two can never be mismatched.
+Settings live in the **Installed** tab of `/plugin`. The two identifiers can also be set — and
+changed — by running `/defender-xdr:xdr-login`, which works everywhere.
 
 ## Where things are stored
 
-`~/.config/claude-defender-xdr/` (mode `0700`) holds:
+A `claude-defender-xdr` folder in your user configuration directory — `~/.config` on macOS and
+Linux, `%APPDATA%` on Windows — holds:
 
-- `config.json` (mode `0600`) — the tenant and application IDs saved by sign-in.
-- `token.json` (mode `0600`) — the refresh token and the signed-in username.
-- `exports/` — full result sets, written only when you explicitly ask Claude to export.
+- `config.json` — the tenant and application IDs saved by sign-in
+- `token.json` — the refresh token and the signed-in username
+- `exports/` — full result sets, written only when you explicitly ask Claude to export
 
-Delete the directory, or run `/defender-xdr:xdr-logout`, to remove the cached sign-in.
+Both files are readable only by your own account. Delete the folder, or run
+`/defender-xdr:xdr-logout`, to remove the cached sign-in.
 
 ## Troubleshooting
 

@@ -1,10 +1,17 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { GRAPH_SCOPE, RESERVED_SCOPES, stateDir, type Config } from "./config.js";
+import {
+  GRAPH_SCOPE,
+  makeOwnerOnlyDir,
+  RESERVED_SCOPES,
+  stateDir,
+  writeOwnerOnlyFile,
+  type Config,
+} from "./config.js";
 
 /** How long the loopback listener waits for the user to finish signing in. */
 const SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
@@ -72,12 +79,8 @@ async function readStoredToken(config: Config): Promise<StoredToken | undefined>
 }
 
 async function writeStoredToken(token: StoredToken): Promise<void> {
-  const directory = stateDir();
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await chmod(directory, 0o700).catch(() => undefined);
-  const path = tokenPath();
-  await writeFile(path, `${JSON.stringify(token, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  await chmod(path, 0o600).catch(() => undefined);
+  await makeOwnerOnlyDir(stateDir());
+  await writeOwnerOnlyFile(tokenPath(), `${JSON.stringify(token, null, 2)}\n`);
 }
 
 export async function clearStoredToken(): Promise<boolean> {
@@ -89,17 +92,40 @@ export async function clearStoredToken(): Promise<boolean> {
   }
 }
 
+/**
+ * How each platform hands a URL to the default browser, most preferred first.
+ *
+ * The URL is always passed as a single argument, and never through a shell: an authorize URL
+ * is full of `&`, which `cmd /c start` reads as a command separator and would cut the URL
+ * short. `explorer.exe` follows the same protocol association the default browser registers,
+ * and `rundll32` covers the installs that have no Explorer shell running.
+ */
+export function browserOpeners(platform: NodeJS.Platform, url: string): [string, string[]][] {
+  switch (platform) {
+    case "darwin":
+      return [["open", [url]]];
+    case "win32":
+      return [
+        ["explorer.exe", [url]],
+        ["rundll32.exe", ["url.dll,FileProtocolHandler", url]],
+      ];
+    default:
+      return [["xdg-open", [url]]];
+  }
+}
+
 /** Opens the system browser without inheriting stdio, which belongs to the MCP transport. */
 function openBrowser(url: string): void {
-  const [command, args] =
-    process.platform === "darwin"
-      ? ["open", [url]]
-      : process.platform === "win32"
-        ? ["cmd", ["/c", "start", "", url]]
-        : ["xdg-open", [url]];
-  const child = spawn(command, args, { stdio: "ignore", detached: true });
-  child.on("error", () => undefined);
-  child.unref();
+  const openers = browserOpeners(process.platform, url);
+  const attempt = (index: number): void => {
+    const opener = openers[index];
+    if (!opener) return;
+    const child = spawn(opener[0], opener[1], { stdio: "ignore", detached: true });
+    // A launcher that is not installed fails with ENOENT; fall through to the next one.
+    child.on("error", () => attempt(index + 1));
+    child.unref();
+  };
+  attempt(0);
 }
 
 function tokenEndpoint(config: Config): string {

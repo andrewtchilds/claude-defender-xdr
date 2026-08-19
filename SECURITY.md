@@ -17,17 +17,24 @@ XDR's own role-based access control applies. The plugin cannot see data the user
 client secret or certificate is used, accepted, or stored — the app registration is a public
 client, and its application ID is not a secret.
 
+**No shell in the sign-in path.** The authorize URL is handed to the default browser as a
+single argument, never through a command interpreter, so nothing in a URL can be reinterpreted
+as a command.
+
 **Authorization code flow with PKCE.** Sign-in uses the authorization code flow with a
 SHA-256 PKCE challenge against a listener bound to `127.0.0.1` on an ephemeral port. The
 listener is not reachable from the network, exists only for the duration of a sign-in, and
 rejects any callback whose `state` does not match the one generated for that request
 (compared with a constant-time comparison).
 
-**Token storage.** Only the refresh token is persisted, to
-`~/.config/claude-defender-xdr/token.json` with mode `0600` inside a `0700` directory. Access
-tokens are held in memory for the life of the server process and are never written to disk. A
-refresh token issued for a different tenant or application ID is discarded rather than used.
-When Microsoft rejects a refresh token, it is deleted immediately instead of being retried.
+**Token storage.** Only the refresh token is persisted, to a `claude-defender-xdr` directory
+inside the user's configuration directory. On macOS and Linux that is `~/.config`, and the file
+is written with mode `0600` inside a `0700` directory. On Windows it is `%APPDATA%`, which has
+no POSIX modes; the file is protected there by the per-user ACL that the profile directory
+already carries, and no mode is set to imply otherwise. Access tokens are held in memory for
+the life of the server process and are never written to disk. A refresh token issued for a
+different tenant or application ID is discarded rather than used. When Microsoft rejects a
+refresh token, it is deleted immediately instead of being retried.
 
 This is the same posture as the Azure CLI and GitHub CLI: a file readable only by your user
 account. It relies on your OS account being the security boundary. If a local attacker already
@@ -44,8 +51,8 @@ cannot be pointed at different places, and neither can be aimed at an arbitrary 
 
 **Bounded output.** Results are capped by a configured maximum row count that a query cannot
 raise, responses over 25 MiB are refused before parsing, and tool output is truncated at 50 KB.
-Full result sets are written to disk only when a user explicitly asks for an export, at mode
-`0600`.
+Full result sets are written to disk only when a user explicitly asks for an export, with the
+same owner-only protection as the token file.
 
 ## Supply chain
 

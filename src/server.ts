@@ -1,10 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { Authenticator, clearStoredToken } from "./auth.js";
-import { loadConfig, readStoredConfig, saveStoredConfig, stateDir, type Config } from "./config.js";
+import {
+  loadConfig,
+  makeOwnerOnlyDir,
+  readStoredConfig,
+  saveStoredConfig,
+  stateDir,
+  writeOwnerOnlyFile,
+  type Config,
+} from "./config.js";
 import { runHuntingQuery } from "./graph.js";
 import { findTable, listTables, schema, searchTables, suggestTables } from "./schema.js";
 
@@ -49,11 +56,10 @@ function stripAnnotations(row: Record<string, unknown>): Record<string, unknown>
 /** Writes untruncated results to an owner-only file, only when explicitly requested. */
 async function exportResults(payload: unknown): Promise<string> {
   const directory = join(stateDir(), "exports");
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await chmod(directory, 0o700).catch(() => undefined);
+  await makeOwnerOnlyDir(directory);
+  // Colons and dots come out of the timestamp because Windows forbids them in file names.
   const path = join(directory, `hunting-${new Date().toISOString().replace(/[:.]/g, "-")}-${randomUUID()}.json`);
-  await writeFile(path, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-  await chmod(path, 0o600).catch(() => undefined);
+  await writeOwnerOnlyFile(path, `${JSON.stringify(payload, null, 2)}\n`);
   return path;
 }
 
