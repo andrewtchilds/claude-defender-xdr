@@ -68,7 +68,7 @@ export function createServer(): McpServer {
     {
       title: "Sign in to Defender XDR",
       description:
-        "Open the system browser and sign in to Microsoft Defender XDR. Call this when a query reports that no sign-in is cached, or when the plugin is not configured yet: passing tenant_id and client_id saves them for future runs and applies them immediately. Returns once the user finishes signing in; the refresh token is then reused, so this is normally needed only once.",
+        "Sign in to Microsoft Defender XDR in the system browser. Querying signs in on its own, so this is only needed to configure the plugin (pass tenant_id and client_id, which are saved and applied immediately), to switch tenant or account, or to sign in ahead of time. Returns once the user finishes signing in.",
       inputSchema: {
         tenant_id: z
           .string()
@@ -128,7 +128,7 @@ export function createServer(): McpServer {
     {
       title: "Run a Defender XDR hunting query",
       description:
-        "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. If it reports that no sign-in is cached, call xdr_login and retry.",
+        "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. Signs the user in through their browser automatically on first use, so call this directly rather than signing in first.",
       inputSchema: {
         query: z.string().describe("The KQL Advanced Hunting query to run"),
         timespan: z

@@ -1,6 +1,6 @@
 {
-  "name": "defender-xdr-local",
-  "description": "Local marketplace for the claude-defender-xdr plugin, installed from a working copy so its npm dependencies resolve",
+  "name": "claude-defender-xdr",
+  "description": "Microsoft Defender XDR Advanced Hunting tools and investigation skills for Claude Code",
   "owner": { "name": "Andrew Childs" },
   "plugins": [
     {

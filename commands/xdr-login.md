@@ -6,6 +6,10 @@ allowed-tools: mcp__plugin_defender-xdr_defender-xdr__xdr_login
 Call the `xdr_login` tool. It opens the user's browser at the Microsoft sign-in page and
 returns once they finish, so run it yourself rather than asking the user to do anything first.
 
+Signing in is not normally required: running a query signs the user in on its own. This
+command is for signing in ahead of time, switching account or tenant, or recovering after a
+sign-in was revoked.
+
 If it reports that the plugin is not configured, ask the user in chat for two GUIDs — their
 Entra tenant ID and the application (client) ID of a public-client app registration with
 delegated `ThreatHunting.Read.All`. Neither is a secret, so it is fine to take them in chat.

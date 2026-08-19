@@ -228,6 +228,7 @@ async function authorizeInteractively(config: Config): Promise<TokenResponse> {
 export class Authenticator {
   private accessToken?: { value: string; expiresAt: number };
   private inFlight?: Promise<string>;
+  private signingIn?: Promise<string>;
 
   constructor(private readonly config: Config) {}
 
@@ -257,7 +258,28 @@ export class Authenticator {
     return username;
   }
 
-  /** Never opens a browser: callers decide whether an interactive sign-in is appropriate. */
+  /**
+   * Returns a usable access token, opening the browser to sign in if nothing is cached.
+   *
+   * Letting the first query sign itself in is what makes a fresh install work without the
+   * caller having to know that `xdr_login` exists. Concurrent callers share one browser
+   * round-trip; without the guard, parallel tool calls would each open a window.
+   */
+  async accessTokenReady(): Promise<string> {
+    try {
+      return await this.accessTokenSilent();
+    } catch (error) {
+      if (!(error instanceof NotSignedInError)) throw error;
+      this.signingIn ??= this.signIn().finally(() => {
+        this.signingIn = undefined;
+      });
+      await this.signingIn;
+      // accept() cached the new access token in memory, so this resolves without a refresh.
+      return await this.accessTokenSilent();
+    }
+  }
+
+  /** Never opens a browser: callers that must not interrupt the user use this instead. */
   async accessTokenSilent(): Promise<string> {
     if (this.accessToken && this.accessToken.expiresAt > Date.now()) return this.accessToken.value;
     // Collapse concurrent refreshes so parallel tool calls do not race on the same token.

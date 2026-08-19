@@ -399,7 +399,7 @@
     <figure>
       <div class="frame">
         <svg viewBox="0 0 1240 300" role="img"
-             aria-label="Sign-in flow: Claude Code calls xdr_login, the MCP server starts a loopback listener and opens the system browser, the user signs in to Microsoft Entra ID with MFA, and Entra returns an auth code to localhost which the server exchanges with its PKCE verifier for a refresh token stored at mode 0600.">
+             aria-label="Sign-in flow: a query with no cached sign-in, or the xdr_login tool, makes the MCP server start a loopback listener and opens the system browser, the user signs in to Microsoft Entra ID with MFA, and Entra returns an auth code to localhost which the server exchanges with its PKCE verifier for a refresh token stored at mode 0600.">
           <defs>
             <marker id="f2-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
               <path d="M0 0 L10 5 L0 10 z" fill="var(--brand-2)"></path>
@@ -408,8 +408,8 @@
 
           <rect x="40" y="60" width="200" height="90" rx="7" fill="var(--surface)" stroke="var(--line)"></rect>
           <text class="svg-title" x="60" y="92">Claude Code</text>
-          <text class="svg-sub" x="60" y="114">calls xdr_login, or you</text>
-          <text class="svg-sub" x="60" y="131">run the slash command</text>
+          <text class="svg-sub" x="60" y="114">runs a query, or calls</text>
+          <text class="svg-sub" x="60" y="131">xdr_login to sign in early</text>
 
           <rect x="360" y="60" width="200" height="90" rx="7" fill="var(--surface)" stroke="var(--brand-2)" stroke-width="2"></rect>
           <text class="svg-title" x="380" y="92">MCP server</text>

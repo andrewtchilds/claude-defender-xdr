@@ -29298,6 +29298,7 @@ var Authenticator = class {
   }
   accessToken;
   inFlight;
+  signingIn;
   async signIn() {
     const tokens = await authorizeInteractively(this.config);
     return await this.accept(tokens);
@@ -29321,7 +29322,26 @@ var Authenticator = class {
     };
     return username;
   }
-  /** Never opens a browser: callers decide whether an interactive sign-in is appropriate. */
+  /**
+   * Returns a usable access token, opening the browser to sign in if nothing is cached.
+   *
+   * Letting the first query sign itself in is what makes a fresh install work without the
+   * caller having to know that `xdr_login` exists. Concurrent callers share one browser
+   * round-trip; without the guard, parallel tool calls would each open a window.
+   */
+  async accessTokenReady() {
+    try {
+      return await this.accessTokenSilent();
+    } catch (error46) {
+      if (!(error46 instanceof NotSignedInError)) throw error46;
+      this.signingIn ??= this.signIn().finally(() => {
+        this.signingIn = void 0;
+      });
+      await this.signingIn;
+      return await this.accessTokenSilent();
+    }
+  }
+  /** Never opens a browser: callers that must not interrupt the user use this instead. */
   async accessTokenSilent() {
     if (this.accessToken && this.accessToken.expiresAt > Date.now()) return this.accessToken.value;
     this.inFlight ??= this.refresh().finally(() => {
@@ -29408,7 +29428,7 @@ var sleep = (ms, signal) => new Promise((resolve, reject) => {
 });
 async function runHuntingQuery(auth, config2, input) {
   if (!input.query.trim()) throw new Error("The KQL query must not be empty");
-  const token = await auth.accessTokenSilent();
+  const token = await auth.accessTokenReady();
   const body = JSON.stringify({
     Query: input.query,
     ...input.timespan ? { Timespan: normalizeTimespan(input.timespan) } : {}
@@ -38120,7 +38140,7 @@ function createServer2() {
     "xdr_login",
     {
       title: "Sign in to Defender XDR",
-      description: "Open the system browser and sign in to Microsoft Defender XDR. Call this when a query reports that no sign-in is cached, or when the plugin is not configured yet: passing tenant_id and client_id saves them for future runs and applies them immediately. Returns once the user finishes signing in; the refresh token is then reused, so this is normally needed only once.",
+      description: "Sign in to Microsoft Defender XDR in the system browser. Querying signs in on its own, so this is only needed to configure the plugin (pass tenant_id and client_id, which are saved and applied immediately), to switch tenant or account, or to sign in ahead of time. Returns once the user finishes signing in.",
       inputSchema: {
         tenant_id: external_exports.string().optional().describe("GUID of the Entra tenant to query. Only needed the first time, or to change tenants."),
         client_id: external_exports.string().optional().describe(
@@ -38164,7 +38184,7 @@ function createServer2() {
     "xdr_run_query",
     {
       title: "Run a Defender XDR hunting query",
-      description: "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. If it reports that no sign-in is cached, call xdr_login and retry.",
+      description: "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. Signs the user in through their browser automatically on first use, so call this directly rather than signing in first.",
       inputSchema: {
         query: external_exports.string().describe("The KQL Advanced Hunting query to run"),
         timespan: external_exports.string().optional().describe("Lookback window such as 7d, 24h, P7D, or PT24H. Defaults to the configured window."),

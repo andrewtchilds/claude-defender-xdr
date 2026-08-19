@@ -90,7 +90,7 @@ export async function runHuntingQuery(
 ): Promise<HuntingResult> {
   if (!input.query.trim()) throw new Error("The KQL query must not be empty");
 
-  const token = await auth.accessTokenSilent();
+  const token = await auth.accessTokenReady();
   const body = JSON.stringify({
     Query: input.query,
     ...(input.timespan ? { Timespan: normalizeTimespan(input.timespan) } : {}),

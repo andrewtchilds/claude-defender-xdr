@@ -2,7 +2,7 @@
 name: defender-xdr-investigation
 description: Investigates cross-domain Defender XDR cases. Use for incident triage, scoping, timelines, and indicator pivots spanning alerts, endpoints, identities, messaging, or cloud applications, or when another XDR investigation skill needs the shared evidence protocol.
 license: MIT
-compatibility: Requires the claude-defender-xdr plugin and a Defender XDR sign-in (the `xdr_login` tool, or `/defender-xdr:xdr-login`), and Defender XDR Advanced Hunting access.
+compatibility: Requires the claude-defender-xdr plugin and a Defender XDR sign-in (the first query opens the browser to sign in; `/defender-xdr:xdr-login` does it ahead of time), and Defender XDR Advanced Hunting access.
 ---
 
 # Defender XDR Investigation

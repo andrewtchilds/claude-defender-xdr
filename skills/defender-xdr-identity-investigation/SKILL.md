@@ -2,7 +2,7 @@
 name: defender-xdr-identity-investigation
 description: Investigates Defender XDR identity activity. Use for Entra sign-ins, MFA or Conditional Access anomalies, password spray, privilege changes, OAuth or service-principal activity, risky sessions, or account compromise.
 license: MIT
-compatibility: Requires the claude-defender-xdr plugin and a Defender XDR sign-in (the `xdr_login` tool, or `/defender-xdr:xdr-login`), and access to applicable identity hunting tables.
+compatibility: Requires the claude-defender-xdr plugin and a Defender XDR sign-in (the first query opens the browser to sign in; `/defender-xdr:xdr-login` does it ahead of time), and access to applicable identity hunting tables.
 ---
 
 # Defender XDR Identity Investigation

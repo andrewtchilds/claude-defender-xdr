@@ -15,7 +15,7 @@ The plugin adds four tools to Claude Code:
 
 | Tool | Purpose |
 | --- | --- |
-| `xdr_login` | Opens your browser to sign in to Microsoft. Needed once. |
+| `xdr_login` | Opens your browser to sign in. Optional — querying signs you in on its own. |
 | `xdr_logout` | Removes the sign-in cached on this machine. |
 | `xdr_run_query` | Runs a read-only KQL query against Advanced Hunting. |
 | `xdr_get_schema` | Looks up hunting tables and columns. Works without signing in. |
@@ -52,33 +52,58 @@ Neither is a secret. This plugin never uses a client secret.
 Each person who uses the plugin also needs a Defender XDR role that permits Advanced Hunting.
 The app registration grants the app's ability to ask; their role decides what they can see.
 
-### 2. Install
+### 2. Add the marketplace
 
-```bash
-/plugin marketplace add <this-repo>
-/plugin install defender-xdr
+In Claude Code, add this repository as a plugin marketplace:
+
+```
+/plugin marketplace add andrewtchilds/claude-defender-xdr
 ```
 
-Claude Code offers to collect the tenant ID and application ID during installation. Both are
-optional there — sign-in asks for whatever is missing.
+This registers the catalog. Nothing is installed yet.
 
-### 3. Sign in
+### 3. Install the plugin
 
-Run `/defender-xdr:xdr-login`, or just ask a question — Claude will call `xdr_login` when it
-finds no cached sign-in. The first time, Claude asks for your tenant ID and application
-(client) ID and saves them; after that your browser opens, you complete the normal Microsoft
-sign-in including MFA, and the tab tells you when to come back.
+Run `/plugin` to open the plugin manager, a tabbed panel you move through with **Tab**:
 
-Saved IDs take effect immediately. Nothing here needs a restart, and none of it depends on the
-`/plugin configure` dialog, which some Claude Code surfaces cannot display.
+1. Go to the **Discover** tab and select **defender-xdr**.
+2. Review the details pane. **Will install** lists every tool, skill, and MCP server the
+   plugin adds, so you can see exactly what you are getting before you agree to it.
+3. Press **Enter** and choose a scope — **User** for yourself across all projects,
+   **Project** to share it with everyone on a repository, **Local** for this repository only.
+
+Claude Code then offers to collect the tenant ID and application ID. Both are optional here;
+whatever you leave blank, sign-in asks for and saves.
+
+If the install summary says `Run /reload-plugins to activate.`, run that. If you would rather
+not use the panel, `/plugin install defender-xdr@claude-defender-xdr` does the same thing, and
+the [Claude desktop app](https://code.claude.com/docs/en/desktop#install-plugins) has its own
+plugin browser.
+
+### 4. Ask a question
+
+There is no separate sign-in step. Ask something:
+
+```
+> which devices ran encoded powershell in the last 24 hours?
+```
+
+The first query opens your browser, you complete the normal Microsoft sign-in including MFA,
+and the tab tells you when to come back. The query then runs and answers.
 
 The sign-in is cached, so you normally do this once. Microsoft decides when it expires; when
-that happens, sign in again.
+that happens, the next query signs you in again. To sign in ahead of time, switch account, or
+change tenant, run `/defender-xdr:xdr-login`.
+
+If you skipped both IDs at install, the first query reports that the plugin is not configured.
+Give Claude the two GUIDs when it asks — they are saved and applied immediately, with no
+restart.
 
 ## Configuration
 
-Settings live in `/plugin configure defender-xdr` where that dialog is available. The two
-identifiers can be set — and changed — through sign-in instead, which works everywhere:
+Settings live in the **Installed** tab of `/plugin`, or in `/plugin configure defender-xdr`
+where that dialog is available. The two identifiers can be set — and changed — through sign-in
+instead, which works everywhere:
 
 ```
 /defender-xdr:xdr-login
