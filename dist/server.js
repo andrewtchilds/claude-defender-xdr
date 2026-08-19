@@ -21093,7 +21093,7 @@ var StdioServerTransport = class {
 
 // src/server.ts
 import { randomUUID } from "node:crypto";
-import { chmod as chmod2, mkdir as mkdir2, writeFile as writeFile2 } from "node:fs/promises";
+import { chmod as chmod3, mkdir as mkdir3, writeFile as writeFile3 } from "node:fs/promises";
 import { join as join3 } from "node:path";
 
 // node_modules/zod/v3/helpers/util.js
@@ -29032,10 +29032,12 @@ var EMPTY_COMPLETION_RESULT = {
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod as chmod2, mkdir as mkdir2, readFile, rm, writeFile as writeFile2 } from "node:fs/promises";
 import { join as join2 } from "node:path";
 
 // src/config.ts
+import { readFileSync } from "node:fs";
+import { chmod, mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 var GRAPH_CLOUDS = /* @__PURE__ */ new Map([
@@ -29049,42 +29051,80 @@ function stateDir(env = process.env) {
   const base = env.XDG_CONFIG_HOME || join(env.HOME || homedir(), ".config");
   return join(base, "claude-defender-xdr");
 }
+function configPath(env = process.env) {
+  return join(stateDir(env), "config.json");
+}
 var NotConfiguredError = class extends Error {
   constructor(missing) {
     super(
       `Defender XDR is not configured: ${missing}.
 
-Run /plugin configure defender-xdr and supply your Entra tenant ID and application (client) ID, then restart Claude Code so the server picks them up.`
+Ask the user for their Entra tenant ID and application (client) ID \u2014 both are GUIDs, and neither is a secret \u2014 then call xdr_login with tenant_id and client_id. They are saved for next time and take effect immediately, with no restart. The IDs can also be set up front with /plugin configure defender-xdr.`
     );
     this.name = "NotConfiguredError";
   }
 };
 var GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function present(value) {
+  const trimmed = value?.trim();
+  if (!trimmed || /^\$\{.*\}$/.test(trimmed)) return void 0;
+  return trimmed;
+}
 function guid3(value, label) {
-  const trimmed = value?.trim() ?? "";
-  if (!trimmed) throw new NotConfiguredError(`${label} is not set`);
-  if (!GUID.test(trimmed)) throw new NotConfiguredError(`${label} is not a GUID (got "${trimmed}")`);
-  return trimmed.toLowerCase();
+  const supplied = present(value);
+  if (!supplied) throw new NotConfiguredError(`${label} is not set`);
+  if (!GUID.test(supplied)) throw new NotConfiguredError(`${label} is not a GUID (got "${supplied}")`);
+  return supplied.toLowerCase();
 }
 function integer2(value, fallback, min, max) {
-  const trimmed = value?.trim();
+  const trimmed = present(value);
   if (!trimmed) return fallback;
   const parsed = Number(trimmed);
   if (!Number.isInteger(parsed)) return fallback;
   return Math.min(Math.max(parsed, min), max);
 }
-function loadConfig(env = process.env) {
-  const graphBaseUrl = (env.XDR_GRAPH_BASE_URL?.trim() || "https://graph.microsoft.com").replace(/\/+$/, "");
+function readStoredConfig(env = process.env) {
+  let parsed;
+  try {
+    parsed = JSON.parse(readFileSync(configPath(env), "utf8"));
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+  const { tenantId, clientId } = parsed;
+  return {
+    tenantId: present(typeof tenantId === "string" ? tenantId : void 0),
+    clientId: present(typeof clientId === "string" ? clientId : void 0)
+  };
+}
+async function saveStoredConfig(values, env = process.env) {
+  const stored = {
+    tenantId: guid3(values.tenantId, "tenant ID"),
+    clientId: guid3(values.clientId, "application (client) ID")
+  };
+  const directory = stateDir(env);
+  await mkdir(directory, { recursive: true, mode: 448 });
+  await chmod(directory, 448).catch(() => void 0);
+  const path = configPath(env);
+  const temp = `${path}.${process.pid}.tmp`;
+  await writeFile(temp, `${JSON.stringify(stored, null, 2)}
+`, { encoding: "utf8", mode: 384 });
+  await chmod(temp, 384).catch(() => void 0);
+  await rename(temp, path);
+  return path;
+}
+function loadConfig(env = process.env, stored = readStoredConfig(env)) {
+  const graphBaseUrl = (present(env.XDR_GRAPH_BASE_URL) ?? "https://graph.microsoft.com").replace(/\/+$/, "");
   const loginBaseUrl = GRAPH_CLOUDS.get(graphBaseUrl);
   if (!loginBaseUrl) {
     throw new NotConfiguredError(
       `"${graphBaseUrl}" is not a Microsoft Graph endpoint (expected one of ${[...GRAPH_CLOUDS.keys()].join(", ")})`
     );
   }
-  const timespan = env.XDR_DEFAULT_TIMESPAN?.trim() || "7d";
+  const timespan = present(env.XDR_DEFAULT_TIMESPAN) ?? "7d";
   return {
-    tenantId: guid3(env.XDR_TENANT_ID, "tenant ID"),
-    clientId: guid3(env.XDR_CLIENT_ID, "application (client) ID"),
+    tenantId: guid3(present(env.XDR_TENANT_ID) ?? stored.tenantId, "tenant ID"),
+    clientId: guid3(present(env.XDR_CLIENT_ID) ?? stored.clientId, "application (client) ID"),
     graphBaseUrl,
     loginBaseUrl,
     maxRows: integer2(env.XDR_MAX_ROWS, 1e3, 1, 1e4),
@@ -29133,12 +29173,12 @@ async function readStoredToken(config2) {
 }
 async function writeStoredToken(token) {
   const directory = stateDir();
-  await mkdir(directory, { recursive: true, mode: 448 });
-  await chmod(directory, 448).catch(() => void 0);
+  await mkdir2(directory, { recursive: true, mode: 448 });
+  await chmod2(directory, 448).catch(() => void 0);
   const path = tokenPath();
-  await writeFile(path, `${JSON.stringify(token, null, 2)}
+  await writeFile2(path, `${JSON.stringify(token, null, 2)}
 `, { encoding: "utf8", mode: 384 });
-  await chmod(path, 384).catch(() => void 0);
+  await chmod2(path, 384).catch(() => void 0);
 }
 async function clearStoredToken() {
   try {
@@ -38038,9 +38078,13 @@ function suggestTables(name, limit = 5) {
 
 // src/server.ts
 var MAX_OUTPUT_BYTES = 50 * 1024;
-function lazily(create) {
+function resettable(create) {
   let cached2;
-  return () => cached2 ??= create();
+  const get = () => cached2 ??= create();
+  get.reset = () => {
+    cached2 = void 0;
+  };
+  return get;
 }
 function serialize(value) {
   const text = JSON.stringify(value, null, 2);
@@ -38060,27 +38104,41 @@ function stripAnnotations(row) {
 }
 async function exportResults(payload) {
   const directory = join3(stateDir(), "exports");
-  await mkdir2(directory, { recursive: true, mode: 448 });
-  await chmod2(directory, 448).catch(() => void 0);
+  await mkdir3(directory, { recursive: true, mode: 448 });
+  await chmod3(directory, 448).catch(() => void 0);
   const path = join3(directory, `hunting-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}-${randomUUID()}.json`);
-  await writeFile2(path, `${JSON.stringify(payload, null, 2)}
+  await writeFile3(path, `${JSON.stringify(payload, null, 2)}
 `, { encoding: "utf8", mode: 384 });
-  await chmod2(path, 384).catch(() => void 0);
+  await chmod3(path, 384).catch(() => void 0);
   return path;
 }
 function createServer2() {
   const server = new McpServer({ name: "defender-xdr", version: "1.0.0" });
-  const config2 = lazily(() => loadConfig());
-  const auth = lazily(() => new Authenticator(config2()));
+  const config2 = resettable(() => loadConfig());
+  const auth = resettable(() => new Authenticator(config2()));
   server.registerTool(
     "xdr_login",
     {
       title: "Sign in to Defender XDR",
-      description: "Open the system browser and sign in to Microsoft Defender XDR. Call this when a query reports that no sign-in is cached. Returns once the user finishes signing in; the refresh token is then reused, so this is normally needed only once.",
-      inputSchema: {}
+      description: "Open the system browser and sign in to Microsoft Defender XDR. Call this when a query reports that no sign-in is cached, or when the plugin is not configured yet: passing tenant_id and client_id saves them for future runs and applies them immediately. Returns once the user finishes signing in; the refresh token is then reused, so this is normally needed only once.",
+      inputSchema: {
+        tenant_id: external_exports.string().optional().describe("GUID of the Entra tenant to query. Only needed the first time, or to change tenants."),
+        client_id: external_exports.string().optional().describe(
+          "GUID of the Entra app registration to sign in with. Only needed the first time. This is not a secret."
+        )
+      }
     },
-    async () => {
+    async ({ tenant_id, client_id }) => {
       try {
+        if (tenant_id || client_id) {
+          const saved = readStoredConfig();
+          await saveStoredConfig({
+            tenantId: tenant_id ?? saved.tenantId ?? "",
+            clientId: client_id ?? saved.clientId ?? ""
+          });
+          config2.reset();
+          auth.reset();
+        }
         const username = await auth().signIn();
         return ok(`Signed in to Defender XDR as ${username}. Queries will reuse this sign-in until it expires or is revoked.`);
       } catch (error46) {

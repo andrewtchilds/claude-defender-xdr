@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { Authenticator, clearStoredToken } from "./auth.js";
-import { loadConfig, stateDir, type Config } from "./config.js";
+import { loadConfig, readStoredConfig, saveStoredConfig, stateDir, type Config } from "./config.js";
 import { runHuntingQuery } from "./graph.js";
 import { findTable, listTables, schema, searchTables, suggestTables } from "./schema.js";
 
@@ -14,12 +14,16 @@ const MAX_OUTPUT_BYTES = 50 * 1024;
 /**
  * Configuration and the authenticator are resolved on first use rather than at startup,
  * so the server still connects (and `xdr_get_schema` still answers) when the plugin has
- * not been configured yet. Only a successful resolution is cached: after the user fixes
- * the configuration and restarts, the next call must see the repaired state.
+ * not been configured yet. Only a successful resolution is cached, and `reset` drops it,
+ * so configuring through `xdr_login` applies to the very next call without a restart.
  */
-function lazily<T>(create: () => T): () => T {
+function resettable<T>(create: () => T) {
   let cached: T | undefined;
-  return () => (cached ??= create());
+  const get = () => (cached ??= create());
+  get.reset = () => {
+    cached = undefined;
+  };
+  return get;
 }
 
 function serialize(value: unknown): string {
@@ -56,19 +60,43 @@ async function exportResults(payload: unknown): Promise<string> {
 export function createServer(): McpServer {
   const server = new McpServer({ name: "defender-xdr", version: "1.0.0" });
 
-  const config = lazily<Config>(() => loadConfig());
-  const auth = lazily(() => new Authenticator(config()));
+  const config = resettable<Config>(() => loadConfig());
+  const auth = resettable(() => new Authenticator(config()));
 
   server.registerTool(
     "xdr_login",
     {
       title: "Sign in to Defender XDR",
       description:
-        "Open the system browser and sign in to Microsoft Defender XDR. Call this when a query reports that no sign-in is cached. Returns once the user finishes signing in; the refresh token is then reused, so this is normally needed only once.",
-      inputSchema: {},
+        "Open the system browser and sign in to Microsoft Defender XDR. Call this when a query reports that no sign-in is cached, or when the plugin is not configured yet: passing tenant_id and client_id saves them for future runs and applies them immediately. Returns once the user finishes signing in; the refresh token is then reused, so this is normally needed only once.",
+      inputSchema: {
+        tenant_id: z
+          .string()
+          .optional()
+          .describe("GUID of the Entra tenant to query. Only needed the first time, or to change tenants."),
+        client_id: z
+          .string()
+          .optional()
+          .describe(
+            "GUID of the Entra app registration to sign in with. Only needed the first time. This is not a secret.",
+          ),
+      },
     },
-    async () => {
+    async ({ tenant_id, client_id }) => {
       try {
+        if (tenant_id || client_id) {
+          // Either ID may be supplied alone to correct just that one, so the missing half
+          // comes from what was saved before. saveStoredConfig validates both.
+          const saved = readStoredConfig();
+          await saveStoredConfig({
+            tenantId: tenant_id ?? saved.tenantId ?? "",
+            clientId: client_id ?? saved.clientId ?? "",
+          });
+          // A new tenant or app makes the resolved config and any cached token stale.
+          config.reset();
+          auth.reset();
+        }
+
         const username = await auth().signIn();
         return ok(`Signed in to Defender XDR as ${username}. Queries will reuse this sign-in until it expires or is revoked.`);
       } catch (error) {

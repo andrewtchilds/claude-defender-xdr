@@ -3,21 +3,29 @@
   "displayName": "Microsoft Defender XDR",
   "version": "1.0.0",
   "description": "Ask questions in plain English and get answers from Microsoft Defender XDR Advanced Hunting",
-  "author": { "name": "Andrew Childs" },
+  "author": {
+    "name": "Andrew Childs"
+  },
   "license": "MIT",
-  "keywords": ["security", "defender", "xdr", "kql", "advanced-hunting", "microsoft", "incident-response"],
+  "keywords": [
+    "security",
+    "defender",
+    "xdr",
+    "kql",
+    "advanced-hunting",
+    "microsoft",
+    "incident-response"
+  ],
   "userConfig": {
     "tenant_id": {
       "type": "string",
       "title": "Entra tenant ID",
-      "description": "GUID of your Microsoft Entra tenant. Find it in the Entra admin center under Overview.",
-      "required": true
+      "description": "GUID of your Microsoft Entra tenant, from the Entra admin center under Overview. Optional here: leave it blank and /defender-xdr:xdr-login will ask for it and save it."
     },
     "client_id": {
       "type": "string",
       "title": "Entra application (client) ID",
-      "description": "GUID of an app registration with 'Allow public client flows' enabled, a redirect URI of http://localhost, and admin-consented delegated Microsoft Graph ThreatHunting.Read.All. This is not a secret; client secrets are never used.",
-      "required": true
+      "description": "GUID of an app registration with 'Allow public client flows' enabled, a redirect URI of http://localhost, and admin-consented delegated Microsoft Graph ThreatHunting.Read.All. This is not a secret; client secrets are never used. Optional here: /defender-xdr:xdr-login will ask for it and save it."
     },
     "graph_base_url": {
       "type": "string",
@@ -44,7 +52,9 @@
     "defender-xdr": {
       "type": "stdio",
       "command": "node",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/dist/server.js"],
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/dist/server.js"
+      ],
       "env": {
         "XDR_TENANT_ID": "${user_config.tenant_id}",
         "XDR_CLIENT_ID": "${user_config.client_id}",

@@ -49,36 +49,42 @@ Neither is a secret. This plugin never uses a client secret.
 Each person who uses the plugin also needs a Defender XDR role that permits Advanced Hunting.
 The app registration grants the app's ability to ask; their role decides what they can see.
 
-### 2. Install and configure
+### 2. Install
 
 ```bash
 /plugin marketplace add <this-repo>
 /plugin install defender-xdr
 ```
 
-Claude Code prompts for the tenant ID and application ID as part of installing. If you skip
-that, or need to change them later, run `/plugin configure defender-xdr`.
-
-**Restart Claude Code after configuring.** The values reach the server through its environment
-when it starts, so a server that is already running will not see them.
+Claude Code offers to collect the tenant ID and application ID during installation. Both are
+optional there — sign-in asks for whatever is missing.
 
 ### 3. Sign in
 
 Run `/defender-xdr:xdr-login`, or just ask a question — Claude will call `xdr_login` when it
-finds no cached sign-in. Your browser opens, you complete the normal Microsoft sign-in
-including MFA, and the tab tells you when to come back.
+finds no cached sign-in. The first time, Claude asks for your tenant ID and application
+(client) ID and saves them; after that your browser opens, you complete the normal Microsoft
+sign-in including MFA, and the tab tells you when to come back.
+
+Saved IDs take effect immediately. Nothing here needs a restart, and none of it depends on the
+`/plugin configure` dialog, which some Claude Code surfaces cannot display.
 
 The sign-in is cached, so you normally do this once. Microsoft decides when it expires; when
 that happens, sign in again.
 
 ## Configuration
 
-All settings live in `/plugin configure defender-xdr`.
+Settings live in `/plugin configure defender-xdr` where that dialog is available. The two
+identifiers can be set — and changed — through sign-in instead, which works everywhere:
+
+```
+/defender-xdr:xdr-login
+```
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Entra tenant ID | — | Required. |
-| Entra application (client) ID | — | Required. |
+| Entra tenant ID | — | Required. Set at install, or by sign-in. |
+| Entra application (client) ID | — | Required. Set at install, or by sign-in. |
 | Microsoft Graph endpoint | `https://graph.microsoft.com` | Change only for sovereign clouds. |
 | Maximum rows per query | 1000 | A hard ceiling; Claude cannot raise it per query. |
 | Default lookback window | `7d` | Used when your question implies no time range. |
@@ -91,6 +97,7 @@ automatically, so the two can never be mismatched.
 
 `~/.config/claude-defender-xdr/` (mode `0700`) holds:
 
+- `config.json` (mode `0600`) — the tenant and application IDs saved by sign-in.
 - `token.json` (mode `0600`) — the refresh token and the signed-in username.
 - `exports/` — full result sets, written only when you explicitly ask Claude to export.
 
@@ -98,8 +105,8 @@ Delete the directory, or run `/defender-xdr:xdr-logout`, to remove the cached si
 
 ## Troubleshooting
 
-**"Defender XDR is not configured"** — run `/plugin configure defender-xdr`, then restart
-Claude Code. This message also appears when you configured the plugin but did not restart.
+**"Defender XDR is not configured"** — run `/defender-xdr:xdr-login` and give Claude the two
+GUIDs when it asks. They are saved and applied immediately.
 
 **"Access denied" (403)** — admin consent was not granted for `ThreatHunting.Read.All`, or
 your account lacks a Defender XDR role permitting Advanced Hunting.
