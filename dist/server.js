@@ -29027,6 +29027,75 @@ var EMPTY_COMPLETION_RESULT = {
   }
 };
 
+// .claude-plugin/plugin.json
+var plugin_default = {
+  name: "defender-xdr",
+  displayName: "Microsoft Defender XDR",
+  version: "1.2.2",
+  description: "Ask questions in plain English and get answers from Microsoft Defender XDR Advanced Hunting",
+  author: {
+    name: "Andrew Childs"
+  },
+  license: "MIT",
+  keywords: [
+    "security",
+    "defender",
+    "xdr",
+    "kql",
+    "advanced-hunting",
+    "microsoft",
+    "incident-response"
+  ],
+  userConfig: {
+    tenant_id: {
+      type: "string",
+      title: "Entra tenant ID",
+      description: "GUID of your Microsoft Entra tenant, from the Entra admin center under Overview. Optional here: leave it blank and /defender-xdr:xdr-login will ask for it and save it."
+    },
+    client_id: {
+      type: "string",
+      title: "Entra application (client) ID",
+      description: "GUID of an app registration with 'Allow public client flows' enabled, a redirect URI of http://localhost, and admin-consented delegated Microsoft Graph ThreatHunting.Read.All. This is not a secret; client secrets are never used. Optional here: /defender-xdr:xdr-login will ask for it and save it."
+    },
+    graph_base_url: {
+      type: "string",
+      title: "Microsoft Graph endpoint",
+      description: "Change only for sovereign clouds: https://graph.microsoft.us (US Gov) or https://microsoftgraph.chinacloudapi.cn (China).",
+      default: "https://graph.microsoft.com"
+    },
+    max_rows: {
+      type: "number",
+      title: "Maximum rows per query",
+      description: "Ceiling on the number of rows returned to Claude.",
+      default: 1e3,
+      min: 1,
+      max: 1e4
+    },
+    default_timespan: {
+      type: "string",
+      title: "Default lookback window",
+      description: "Used when a question does not imply a time range, such as 7d or 24h.",
+      default: "7d"
+    }
+  },
+  mcpServers: {
+    "defender-xdr": {
+      type: "stdio",
+      command: "node",
+      args: [
+        "${CLAUDE_PLUGIN_ROOT}/dist/server.js"
+      ],
+      env: {
+        XDR_TENANT_ID: "${user_config.tenant_id}",
+        XDR_CLIENT_ID: "${user_config.client_id}",
+        XDR_GRAPH_BASE_URL: "${user_config.graph_base_url}",
+        XDR_MAX_ROWS: "${user_config.max_rows}",
+        XDR_DEFAULT_TIMESPAN: "${user_config.default_timespan}"
+      }
+    }
+  }
+};
+
 // src/auth.ts
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
@@ -38310,7 +38379,7 @@ async function exportResults(payload) {
   return path;
 }
 function createServer2() {
-  const server = new McpServer({ name: "defender-xdr", version: "1.2.0" });
+  const server = new McpServer({ name: plugin_default.name, version: plugin_default.version });
   const config2 = resettable(() => loadConfig());
   const auth = resettable(() => new Authenticator(config2()));
   server.registerTool(

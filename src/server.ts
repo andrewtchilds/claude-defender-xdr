@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+// The manifest version is imported, not restated, so the version Claude sees over MCP cannot
+// drift from the one the plugin was packaged and released under.
+import manifest from "../.claude-plugin/plugin.json" with { type: "json" };
 import { Authenticator, clearStoredToken } from "./auth.js";
 import {
   loadConfig,
@@ -92,7 +95,7 @@ async function exportResults(payload: unknown): Promise<string> {
 }
 
 export function createServer(): McpServer {
-  const server = new McpServer({ name: "defender-xdr", version: "1.2.0" });
+  const server = new McpServer({ name: manifest.name, version: manifest.version });
 
   const config = resettable<Config>(() => loadConfig());
   const auth = resettable(() => new Authenticator(config()));

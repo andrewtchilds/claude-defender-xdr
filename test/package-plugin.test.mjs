@@ -71,6 +71,16 @@ describe("version checks", () => {
   });
 });
 
+describe("the version the server reports", () => {
+  it("comes from the manifest, so MCP cannot report a stale version", () => {
+    const manifest = JSON.parse(readFileSync(join(root, ".claude-plugin", "plugin.json"), "utf8"));
+    const source = readFileSync(join(root, "src", "server.ts"), "utf8");
+    expect(source).toContain("version: manifest.version");
+    expect(source).not.toMatch(/version: "\d+\.\d+\.\d+"/);
+    expect(built.version).toBe(manifest.version);
+  });
+});
+
 describe("zip writer", () => {
   it("round-trips file contents and directory markers", () => {
     const body = Buffer.from("hello".repeat(200));
