@@ -18,9 +18,9 @@ jobs:
     permissions:
       contents: write # create the release and upload the ZIP to it
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -67,7 +67,7 @@ jobs:
             --notes-file release-notes.md \
             --verify-tag
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: defender-xdr-v${{ steps.package.outputs.version }}
           path: ${{ steps.package.outputs.zip }}
