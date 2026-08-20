@@ -10,7 +10,7 @@ Signing in is not normally required: running a query signs the user in on its ow
 command is for signing in ahead of time, switching account or tenant, or recovering after a
 sign-in was revoked.
 
-If it reports that the plugin is not configured, ask the user in chat for two GUIDs — their
+If it reports that the plugin is not configured, ask the user in chat for two GUIDs: their
 Entra tenant ID and the application (client) ID of a public-client app registration with
 delegated `ThreatHunting.Read.All`. Neither is a secret, so it is fine to take them in chat.
 Then call `xdr_login` again with `tenant_id` and `client_id`. That saves them and signs in

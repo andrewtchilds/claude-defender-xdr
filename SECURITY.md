@@ -14,7 +14,7 @@ tenant.
 
 **Delegated, never application, permissions.** Queries run as the signed-in user, so Defender
 XDR's own role-based access control applies. The plugin cannot see data the user cannot see. No
-client secret or certificate is used, accepted, or stored — the app registration is a public
+client secret or certificate is used, accepted, or stored. The app registration is a public
 client, and its application ID is not a secret.
 
 **No shell in the sign-in path.** The authorize URL is handed to the default browser as a
@@ -38,7 +38,7 @@ refresh token, it is deleted immediately instead of being retried.
 
 This is the same posture as the Azure CLI and GitHub CLI: a file readable only by your user
 account. It relies on your OS account being the security boundary. If a local attacker already
-has your user account, they have the token — and independently, they can run this plugin.
+has your user account, they have the token. They can also run this plugin themselves.
 
 **Token and secret hygiene.** Tokens are never logged. Error messages from Microsoft Graph are
 truncated, stripped of newlines, and scrubbed of `Bearer` values before being shown. The

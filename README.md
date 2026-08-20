@@ -26,10 +26,10 @@ signed in.
 
 Describing a table runs one zero-row query against it and caches the columns for a week.
 Running a hunting query does the same for every table that query read, so the tenant's real
-columns are on disk before you think to ask. Preview columns, custom tables, and anything newer
-than the documentation therefore appear as they are, and any column the docs claim while your
-tenant does not return it gets listed on its own. Pass `live: false` to stay offline, or
-`refresh: true` to ask again before the week is up.
+columns are on disk before you think to ask. That is how preview columns, custom tables, and
+anything newer than the documentation show up. A column the documentation lists but your tenant
+does not return is reported separately rather than dropped. Pass `live: false` to stay offline,
+or `refresh: true` to ask again before the week is up.
 
 The plugin also installs four investigation skills, one for cross-domain work and one each for
 endpoint, identity, and messaging. They teach Claude to scope an investigation, pick the

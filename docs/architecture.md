@@ -151,6 +151,6 @@ terminal. After this, queries refresh silently until Microsoft expires or revoke
 
 ---
 
-Drawn from the plugin source at v1.2.0: `src/server.ts`, `src/auth.ts`, `src/graph.ts`,
+Drawn from the plugin source at v1.2.1: `src/server.ts`, `src/auth.ts`, `src/graph.ts`,
 `src/live-schema.ts`, and the bundled schema snapshot dated 13 April 2026, holding 64 tables of
 which 42 are active, 19 preview, and 3 retired.
