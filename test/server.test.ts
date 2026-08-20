@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { makeOwnerOnlyDir, stateDir } from "../src/config.js";
-import { createServer } from "../src/server.js";
+import { clientSignInPrompt, createServer } from "../src/server.js";
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
 const CLIENT = "22222222-2222-2222-2222-222222222222";
@@ -206,5 +206,53 @@ describe("xdr_get_schema against a tenant", () => {
 
     expect(await getSchema("xdr_get_schema", { refresh: true })).toContain("refresh applies only to an exact table");
     expect(await getSchema("xdr_get_schema", { table: "DeviceInfo", search: "device" })).toContain("Pass either table or search");
+  });
+});
+
+describe("clientSignInPrompt", () => {
+  /** Stands in for the low-level Server, recording what the client was asked to show. */
+  function fake(capabilities: unknown) {
+    const sent: Array<Record<string, unknown>> = [];
+    const prompt = clientSignInPrompt({
+      server: {
+        getClientCapabilities: () => capabilities,
+        elicitInput: async (params: Record<string, unknown>) => {
+          sent.push(params);
+          return { action: "accept" };
+        },
+        createElicitationCompletionNotifier: () => async () => {},
+      },
+    } as never);
+    return { prompt, sent };
+  }
+
+  // Claude Code 2.1.238 advertises form mode only, and answers a URL elicitation with
+  // "Client does not support url elicitation." Asking anyway wastes a round trip and leaves
+  // the person staring at nothing while the request is refused.
+  it("does not hand a URL to a client that only advertises form mode", () => {
+    const { prompt, sent } = fake({ elicitation: { form: {} } });
+    expect(prompt.handOff("https://login.example/authorize?a=1", "id-1")).toBeUndefined();
+    expect(sent).toEqual([]);
+  });
+
+  it("does not hand a URL to a client with no elicitation at all", () => {
+    const { prompt, sent } = fake({ roots: { listChanged: true } });
+    expect(prompt.handOff("https://login.example/authorize?a=1", "id-1")).toBeUndefined();
+    expect(sent).toEqual([]);
+  });
+
+  it("hands the URL over once a client advertises url mode", async () => {
+    const { prompt, sent } = fake({ elicitation: { form: {}, url: {} } });
+    const handoff = prompt.handOff("https://login.example/authorize?a=1&b=2", "id-2");
+    expect(handoff).toBeDefined();
+    await expect(handoff!.answered).resolves.toEqual({ action: "accept" });
+    expect(sent).toEqual([
+      {
+        mode: "url",
+        message: expect.stringContaining("Sign in to Microsoft Defender XDR"),
+        url: "https://login.example/authorize?a=1&b=2",
+        elicitationId: "id-2",
+      },
+    ]);
   });
 });

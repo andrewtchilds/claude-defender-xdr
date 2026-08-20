@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { Authenticator, browserOpeners, NotSignedInError } from "../src/auth.js";
+import type { SignInHandoff, SignInPrompt } from "../src/auth.js";
 import type { Config } from "../src/config.js";
 
 const config = {
@@ -69,12 +70,109 @@ describe("browserOpeners", () => {
     expect(browserOpeners(platform, url).length).toBeGreaterThan(0);
   });
 
-  // The authorize URL is full of `&`. Passed to a shell it would be split into commands and
-  // the browser would open a truncated URL, so it has to survive as one whole argument.
-  it.each(["darwin", "win32", "linux"] as NodeJS.Platform[])("passes the URL unshelled on %s", platform => {
-    for (const [command, args] of browserOpeners(platform, url)) {
-      expect(command).not.toMatch(/^(cmd|sh|bash|zsh|powershell|pwsh)/i);
-      expect(args).toContain(url);
+  it.each(["darwin", "linux"] as NodeJS.Platform[])("passes the URL whole on %s", platform => {
+    for (const opener of browserOpeners(platform, url)) {
+      expect(opener.args).toContain(url);
+      expect(opener.verbatim).toBeUndefined();
     }
+  });
+
+  // explorer.exe reads its argument as a path before trying it as a URL, and an authorize URL
+  // is longer than Windows allows a path to be. It opens a file browser window instead.
+  it("never asks explorer.exe to open a URL", () => {
+    for (const opener of browserOpeners("win32", url)) {
+      expect(opener.command).not.toMatch(/explorer/i);
+    }
+  });
+
+  // ShellExecute via url.dll is the native association lookup, with no shell to escape for.
+  it("reaches the default browser through ShellExecute first on win32", () => {
+    const first = browserOpeners("win32", url)[0]!;
+    expect(first.command).toMatch(/rundll32/i);
+    expect(first.args).toContain(url);
+    expect(first.verbatim).toBeUndefined();
+  });
+
+  // cmd reads a bare `&` as a command separator, which would cut the query string short.
+  it("escapes every & for the cmd fallback, and quotes nothing", () => {
+    const cmd = browserOpeners("win32", url).find(o => o.command === "cmd.exe")!;
+    expect(cmd.verbatim).toBe(true);
+    const target = cmd.args.at(-1)!;
+    expect(target).toBe(url.replace(/&/g, "^&"));
+    expect(target).not.toMatch(/&(?<!\^&)/);
+    // Quoting would make cmd pass the carets through to the browser verbatim.
+    expect(target).not.toContain('"');
+  });
+
+  // `start` reads its first quoted argument as a window title, so the title has to be there.
+  it("gives start its title argument before the URL", () => {
+    const cmd = browserOpeners("win32", url).find(o => o.command === "cmd.exe")!;
+    expect(cmd.args.indexOf('""')).toBeGreaterThan(cmd.args.indexOf("start"));
+    expect(cmd.args.indexOf('""')).toBeLessThan(cmd.args.length - 1);
+  });
+
+  it("keeps a fallback behind the native call", () => {
+    const fallback = browserOpeners("win32", url).at(-1)!;
+    expect(fallback.command).toBe("cmd.exe");
+    expect(browserOpeners("win32", url)).toHaveLength(2);
+  });
+});
+
+describe("handing the sign-in URL to the client", () => {
+  /** Records what the client was asked to show, and answers the dialog on command. */
+  function recordingPrompt(action: "accept" | "decline") {
+    const seen: { url?: string; elicitationId?: string; settled: string[] } = { settled: [] };
+    const prompt: SignInPrompt = {
+      handOff(url, elicitationId): SignInHandoff {
+        seen.url = url;
+        seen.elicitationId = elicitationId;
+        return {
+          answered: Promise.resolve({ action }),
+        };
+      },
+      settle(elicitationId) {
+        seen.settled.push(elicitationId);
+      },
+    };
+    return { prompt, seen };
+  }
+
+  it("gives the client the authorize URL instead of launching a browser", async () => {
+    const { prompt, seen } = recordingPrompt("decline");
+    await expect(new Authenticator(config, prompt).signIn()).rejects.toThrow(/declined/);
+    expect(seen.url).toContain(`${config.loginBaseUrl}/${config.tenantId}/oauth2/v2.0/authorize`);
+    expect(seen.url).toContain("code_challenge_method=S256");
+    // The redirect has to name the loopback port the listener actually bound.
+    expect(seen.url).toMatch(/redirect_uri=http%3A%2F%2Flocalhost%3A\d+/);
+  });
+
+  it("takes the client's dialog down once the sign-in is over", async () => {
+    const { prompt, seen } = recordingPrompt("decline");
+    await expect(new Authenticator(config, prompt).signIn()).rejects.toThrow(/declined/);
+    expect(seen.settled).toEqual([seen.elicitationId]);
+  });
+
+  it("uses a fresh elicitation id per sign-in, so a stale dialog is never dismissed", async () => {
+    const first = recordingPrompt("decline");
+    const second = recordingPrompt("decline");
+    await expect(new Authenticator(config, first.prompt).signIn()).rejects.toThrow(/declined/);
+    await expect(new Authenticator(config, second.prompt).signIn()).rejects.toThrow(/declined/);
+    expect(first.seen.elicitationId).not.toBe(second.seen.elicitationId);
+  });
+
+  it("falls back to a local browser when the client cannot show a URL", async () => {
+    // handOff returning undefined is the no-elicitation client. Nothing is settled, because
+    // there is no dialog to take down, and the sign-in waits on the loopback as before.
+    const settled: string[] = [];
+    const prompt: SignInPrompt = {
+      handOff: () => undefined,
+      settle: id => settled.push(id),
+    };
+    const auth = new Authenticator(config, prompt);
+    const pending = auth.signIn();
+    // Nothing resolves it here, so prove it stayed pending rather than erroring out.
+    const race = await Promise.race([pending.then(() => "settled", () => "rejected"), Promise.resolve("pending")]);
+    expect(race).toBe("pending");
+    expect(settled).toEqual([]);
   });
 });

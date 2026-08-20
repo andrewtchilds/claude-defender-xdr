@@ -5,7 +5,7 @@ import { z } from "zod";
 // The manifest version is imported, not restated, so the version Claude sees over MCP cannot
 // drift from the one the plugin was packaged and released under.
 import manifest from "../.claude-plugin/plugin.json" with { type: "json" };
-import { Authenticator, clearStoredToken } from "./auth.js";
+import { Authenticator, clearStoredToken, type SignInPrompt } from "./auth.js";
 import {
   loadConfig,
   makeOwnerOnlyDir,
@@ -94,18 +94,55 @@ async function exportResults(payload: unknown): Promise<string> {
   return path;
 }
 
+/**
+ * Hands sign-in URLs to the client instead of launching a browser in this process.
+ *
+ * URL-mode elicitation is the right shape for this: the client opens the URL and confirms
+ * when the flow is done, so the server spawns nothing. That matters more here than in most
+ * plugins, because the Windows alternatives are `rundll32` and encoded `powershell`, both of
+ * which a Defender tenant is liable to alert on.
+ *
+ * Support is checked against `elicitation.url` rather than `elicitation` as a whole, because
+ * the two modes are advertised separately. Claude Code 2.1.238 declares `{ form: {} }` and
+ * answers a URL elicitation with "Client does not support url elicitation.", so today this
+ * returns undefined and sign-in opens a browser locally. Nothing here needs to change when a
+ * client starts advertising `url`; the handoff then takes over on its own.
+ */
+export function clientSignInPrompt(server: Pick<McpServer, "server">): SignInPrompt {
+  return {
+    handOff(url, elicitationId) {
+      if (!server.server.getClientCapabilities()?.elicitation?.url) return undefined;
+      return {
+        answered: server.server.elicitInput({
+          mode: "url",
+          message: "Sign in to Microsoft Defender XDR, then confirm here once you are done.",
+          url,
+          elicitationId,
+        }),
+      };
+    },
+    settle(elicitationId) {
+      // Best effort. The sign-in has already succeeded or failed on its own terms, so a
+      // client that cannot take the notification changes nothing about the result.
+      void server.server
+        .createElicitationCompletionNotifier(elicitationId)()
+        .catch(() => {});
+    },
+  };
+}
+
 export function createServer(): McpServer {
   const server = new McpServer({ name: manifest.name, version: manifest.version });
 
   const config = resettable<Config>(() => loadConfig());
-  const auth = resettable(() => new Authenticator(config()));
+  const auth = resettable(() => new Authenticator(config(), clientSignInPrompt(server)));
 
   server.registerTool(
     "xdr_login",
     {
       title: "Sign in to Defender XDR",
       description:
-        "Sign in to Microsoft Defender XDR in the system browser. Querying signs in on its own, so this is only needed to configure the plugin (pass tenant_id and client_id, which are saved and applied immediately), to switch tenant or account, or to sign in ahead of time. Returns once the user finishes signing in.",
+        "Sign in to Microsoft Defender XDR in the browser. Querying signs in on its own, so this is only needed to configure the plugin (pass tenant_id and client_id, which are saved and applied immediately), to switch tenant or account, or to sign in ahead of time. Returns once the user finishes signing in.",
       inputSchema: {
         tenant_id: z
           .string()

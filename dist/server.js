@@ -21092,7 +21092,7 @@ var StdioServerTransport = class {
 };
 
 // src/server.ts
-import { randomUUID } from "node:crypto";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { join as join4 } from "node:path";
 
 // node_modules/zod/v3/helpers/util.js
@@ -29031,7 +29031,7 @@ var EMPTY_COMPLETION_RESULT = {
 var plugin_default = {
   name: "defender-xdr",
   displayName: "Microsoft Defender XDR",
-  version: "1.2.2",
+  version: "1.2.3",
   description: "Ask questions in plain English and get answers from Microsoft Defender XDR Advanced Hunting",
   author: {
     name: "Andrew Childs"
@@ -29098,7 +29098,7 @@ var plugin_default = {
 
 // src/auth.ts
 import { spawn } from "node:child_process";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { readFile, rm as rm2 } from "node:fs/promises";
 import { join as join2 } from "node:path";
@@ -29282,14 +29282,18 @@ async function clearStoredToken() {
 function browserOpeners(platform, url2) {
   switch (platform) {
     case "darwin":
-      return [["open", [url2]]];
+      return [{ command: "open", args: [url2] }];
     case "win32":
       return [
-        ["explorer.exe", [url2]],
-        ["rundll32.exe", ["url.dll,FileProtocolHandler", url2]]
+        { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url2] },
+        {
+          command: "cmd.exe",
+          args: ["/c", "start", '""', "/b", url2.replace(/&/g, "^&")],
+          verbatim: true
+        }
       ];
     default:
-      return [["xdg-open", [url2]]];
+      return [{ command: "xdg-open", args: [url2] }];
   }
 }
 function openBrowser(url2) {
@@ -29297,8 +29301,16 @@ function openBrowser(url2) {
   const attempt = (index) => {
     const opener = openers[index];
     if (!opener) return;
-    const child = spawn(opener[0], opener[1], { stdio: "ignore", detached: true });
+    const child = spawn(opener.command, opener.args, {
+      stdio: "ignore",
+      detached: true,
+      windowsHide: true,
+      windowsVerbatimArguments: opener.verbatim
+    });
     child.on("error", () => attempt(index + 1));
+    child.on("exit", (code) => {
+      if (code !== 0) attempt(index + 1);
+    });
     child.unref();
   };
   attempt(0);
@@ -29327,17 +29339,20 @@ function htmlPage(title, message) {
 <body style="font-family:system-ui,sans-serif;display:grid;place-items:center;height:100vh;margin:0;color:#222E65">
 <div style="text-align:center"><h1 style="font-size:1.25rem">${title}</h1><p>${message}</p></div>`;
 }
-async function authorizeInteractively(config2) {
+async function authorizeInteractively(config2, prompt) {
   const verifier = randomBytes(32).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
   const state = randomBytes(16).toString("base64url");
   return await new Promise((resolve, reject) => {
+    const elicitationId = randomUUID();
+    let handedOff = false;
     let settled = false;
     const finish = (error46, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       server.close();
+      if (handedOff) prompt?.settle(elicitationId);
       error46 ? reject(error46) : resolve(value);
     };
     const timer = setTimeout(
@@ -29397,19 +29412,35 @@ async function authorizeInteractively(config2) {
         code_challenge_method: "S256",
         prompt: "select_account"
       }).toString();
-      openBrowser(authorizeUrl.toString());
+      const url2 = authorizeUrl.toString();
+      const handoff = prompt?.handOff(url2, elicitationId);
+      if (!handoff) {
+        openBrowser(url2);
+        return;
+      }
+      handedOff = true;
+      handoff.answered.then(
+        (result) => {
+          if (result.action !== "accept") finish(new Error("Sign-in was declined."));
+        },
+        () => {
+          handedOff = false;
+          openBrowser(url2);
+        }
+      );
     });
   });
 }
 var Authenticator = class {
-  constructor(config2) {
+  constructor(config2, prompt) {
     this.config = config2;
+    this.prompt = prompt;
   }
   accessToken;
   inFlight;
   signingIn;
   async signIn() {
-    const tokens = await authorizeInteractively(this.config);
+    const tokens = await authorizeInteractively(this.config, this.prompt);
     return await this.accept(tokens);
   }
   async signedInAs() {
@@ -38373,20 +38404,39 @@ function describeVerification(verified) {
 async function exportResults(payload) {
   const directory = join4(stateDir(), "exports");
   await makeOwnerOnlyDir(directory);
-  const path = join4(directory, `hunting-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}-${randomUUID()}.json`);
+  const path = join4(directory, `hunting-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}-${randomUUID2()}.json`);
   await writeOwnerOnlyFile(path, `${JSON.stringify(payload, null, 2)}
 `);
   return path;
 }
+function clientSignInPrompt(server) {
+  return {
+    handOff(url2, elicitationId) {
+      if (!server.server.getClientCapabilities()?.elicitation?.url) return void 0;
+      return {
+        answered: server.server.elicitInput({
+          mode: "url",
+          message: "Sign in to Microsoft Defender XDR, then confirm here once you are done.",
+          url: url2,
+          elicitationId
+        })
+      };
+    },
+    settle(elicitationId) {
+      void server.server.createElicitationCompletionNotifier(elicitationId)().catch(() => {
+      });
+    }
+  };
+}
 function createServer2() {
   const server = new McpServer({ name: plugin_default.name, version: plugin_default.version });
   const config2 = resettable(() => loadConfig());
-  const auth = resettable(() => new Authenticator(config2()));
+  const auth = resettable(() => new Authenticator(config2(), clientSignInPrompt(server)));
   server.registerTool(
     "xdr_login",
     {
       title: "Sign in to Defender XDR",
-      description: "Sign in to Microsoft Defender XDR in the system browser. Querying signs in on its own, so this is only needed to configure the plugin (pass tenant_id and client_id, which are saved and applied immediately), to switch tenant or account, or to sign in ahead of time. Returns once the user finishes signing in.",
+      description: "Sign in to Microsoft Defender XDR in the browser. Querying signs in on its own, so this is only needed to configure the plugin (pass tenant_id and client_id, which are saved and applied immediately), to switch tenant or account, or to sign in ahead of time. Returns once the user finishes signing in.",
       inputSchema: {
         tenant_id: external_exports.string().optional().describe("GUID of the Entra tenant to query. Only needed the first time, or to change tenants."),
         client_id: external_exports.string().optional().describe(

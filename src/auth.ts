@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
 import { readFile, rm } from "node:fs/promises";
 import { AddressInfo } from "node:net";
@@ -93,24 +93,67 @@ export async function clearStoredToken(): Promise<boolean> {
 }
 
 /**
- * How each platform hands a URL to the default browser, most preferred first.
+ * How a sign-in URL reaches the person signing in.
  *
- * The URL is always passed as a single argument, and never through a shell: an authorize URL
- * is full of `&`, which `cmd /c start` reads as a command separator and would cut the URL
- * short. `explorer.exe` follows the same protocol association the default browser registers,
- * and `rundll32` covers the installs that have no Explorer shell running.
+ * A client that supports URL elicitation opens the URL itself, which is the whole point: this
+ * process then launches nothing, so there is no platform launcher to get wrong and no
+ * `rundll32` or `powershell` child process for an EDR to flag. The launcher below is only
+ * for clients that cannot show a URL.
  */
-export function browserOpeners(platform: NodeJS.Platform, url: string): [string, string[]][] {
+export interface SignInHandoff {
+  /** Resolves when the person answers the client's dialog. Rejects if it cannot show one. */
+  readonly answered: Promise<{ action: string }>;
+}
+
+export interface SignInPrompt {
+  /** Returns undefined when the client has no way to put a URL in front of the user. */
+  handOff(url: string, elicitationId: string): SignInHandoff | undefined;
+  /** Tells the client the sign-in is over, so it can take its dialog down. */
+  settle(elicitationId: string): void;
+}
+
+export interface BrowserOpener {
+  command: string;
+  args: string[];
+  /** cmd.exe parses its own command line, so Node must not re-quote what we wrote. */
+  verbatim?: boolean;
+}
+
+/**
+ * How each platform hands a URL to the default browser, most preferred first. This runs only
+ * when the client cannot show a URL itself; see SignInPrompt.
+ *
+ * Windows has no plain "open this URL" binary, so the goal is the shortest path to
+ * ShellExecute, which is what resolves the `http` association to whatever browser the user
+ * set as default. `url.dll,FileProtocolHandler` is that call with no shell in front of it,
+ * and rundll32 reads everything after the comma and space as one argument, so a query string
+ * full of `&` needs no escaping.
+ *
+ * `cmd /c start` reaches the same API through a shell, which is why it is only the fallback.
+ * There `&` has to become `^&` or cmd reads the query string as more commands, and the URL
+ * stays unquoted because `^` is literal inside double quotes and the carets would reach the
+ * browser. The bare `""` is the window title `start` expects first, and without it start
+ * reads the URL as a title and opens nothing.
+ *
+ * `explorer.exe` is deliberately absent. It reads its argument as a filesystem path before
+ * trying it as a URL, and an authorize URL runs past 400 characters, well beyond the
+ * 260-character path limit. Explorer gives up and opens a file browser window instead.
+ */
+export function browserOpeners(platform: NodeJS.Platform, url: string): BrowserOpener[] {
   switch (platform) {
     case "darwin":
-      return [["open", [url]]];
+      return [{ command: "open", args: [url] }];
     case "win32":
       return [
-        ["explorer.exe", [url]],
-        ["rundll32.exe", ["url.dll,FileProtocolHandler", url]],
+        { command: "rundll32.exe", args: ["url.dll,FileProtocolHandler", url] },
+        {
+          command: "cmd.exe",
+          args: ["/c", "start", '""', "/b", url.replace(/&/g, "^&")],
+          verbatim: true,
+        },
       ];
     default:
-      return [["xdg-open", [url]]];
+      return [{ command: "xdg-open", args: [url] }];
   }
 }
 
@@ -120,9 +163,18 @@ function openBrowser(url: string): void {
   const attempt = (index: number): void => {
     const opener = openers[index];
     if (!opener) return;
-    const child = spawn(opener[0], opener[1], { stdio: "ignore", detached: true });
-    // A launcher that is not installed fails with ENOENT; fall through to the next one.
+    const child = spawn(opener.command, opener.args, {
+      stdio: "ignore",
+      detached: true,
+      windowsHide: true,
+      windowsVerbatimArguments: opener.verbatim,
+    });
+    // A launcher that is not installed fails with ENOENT, and one that ran but could not
+    // reach a browser exits non-zero. Either way the next opener gets a turn.
     child.on("error", () => attempt(index + 1));
+    child.on("exit", code => {
+      if (code !== 0) attempt(index + 1);
+    });
     child.unref();
   };
   attempt(0);
@@ -164,18 +216,22 @@ function htmlPage(title: string, message: string): string {
  * matches, so this binds an ephemeral port rather than requiring a fixed one to be
  * registered. Nothing here needs a terminal, which is why it can run inside an MCP tool.
  */
-async function authorizeInteractively(config: Config): Promise<TokenResponse> {
+async function authorizeInteractively(config: Config, prompt?: SignInPrompt): Promise<TokenResponse> {
   const verifier = randomBytes(32).toString("base64url");
   const challenge = createHash("sha256").update(verifier).digest("base64url");
   const state = randomBytes(16).toString("base64url");
 
   return await new Promise<TokenResponse>((resolve, reject) => {
+    const elicitationId = randomUUID();
+    let handedOff = false;
     let settled = false;
     const finish = (error: Error | undefined, value?: TokenResponse) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       server.close();
+      // The client cannot see the loopback callback, so its dialog stays up until told.
+      if (handedOff) prompt?.settle(elicitationId);
       error ? reject(error) : resolve(value!);
     };
 
@@ -245,7 +301,25 @@ async function authorizeInteractively(config: Config): Promise<TokenResponse> {
         code_challenge_method: "S256",
         prompt: "select_account",
       }).toString();
-      openBrowser(authorizeUrl.toString());
+      const url = authorizeUrl.toString();
+      const handoff = prompt?.handOff(url, elicitationId);
+      if (!handoff) {
+        openBrowser(url);
+        return;
+      }
+      handedOff = true;
+      handoff.answered.then(
+        result => {
+          // Anything but acceptance is the person calling the sign-in off. Arriving after a
+          // successful callback is normal, and finish() ignores it.
+          if (result.action !== "accept") finish(new Error("Sign-in was declined."));
+        },
+        () => {
+          // The client took the request and could not show it after all. Open one here.
+          handedOff = false;
+          openBrowser(url);
+        },
+      );
     });
   });
 }
@@ -256,10 +330,13 @@ export class Authenticator {
   private inFlight?: Promise<string>;
   private signingIn?: Promise<string>;
 
-  constructor(private readonly config: Config) {}
+  constructor(
+    private readonly config: Config,
+    private readonly prompt?: SignInPrompt,
+  ) {}
 
   async signIn(): Promise<string> {
-    const tokens = await authorizeInteractively(this.config);
+    const tokens = await authorizeInteractively(this.config, this.prompt);
     return await this.accept(tokens);
   }
 
