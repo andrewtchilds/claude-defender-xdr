@@ -38,8 +38,8 @@ cheapest table, and pivot on indicators instead of dumping raw events.
 Everything is read-only. Advanced Hunting cannot modify tenant state, and the only permission
 requested is the read-only `ThreatHunting.Read.All`.
 
-[`docs/architecture.md`](docs/architecture.md) has diagrams of the query path, the two schema
-sources, and the sign-in flow.
+[`docs/architecture.md`](https://github.com/andrewtchilds/claude-defender-xdr/blob/main/docs/architecture.md)
+has diagrams of the query path, the two schema sources, and the sign-in flow.
 
 ## Setup
 
@@ -145,6 +145,8 @@ client. Enable **Allow public client flows** and confirm `http://localhost` is r
 ```bash
 npm install
 npm run verify        # typecheck, tests, build, and confirm dist/ is current
+npm run package       # build the distributable plugin ZIP into build/
+npm run check:package # build it, then validate the staged plugin manifest
 npm run schema        # rebuild the bundled schema snapshot from Microsoft's docs
 npm run schema:check  # report drift against the docs without writing
 ```
@@ -158,6 +160,39 @@ own documentation source, pins the commit it read, and rewrites
 `schema-snapshot/defender-xdr-schema.json`, so the diff on that file is exactly what Microsoft
 changed. Microsoft announces table retirements in prose rather than in the schema tables, so the
 script carries a short curated list of them and warns when an entry stops matching the docs.
+
+## Releasing
+
+Releases exist so the plugin can be uploaded to a Claude Enterprise organizational marketplace,
+which does not sync from GitHub. GitHub stays the source of truth; the release ZIP is just the
+artifact you hand to Claude.
+
+1. Bump `version` in `.claude-plugin/plugin.json` and in `package.json`. The two have to agree, and
+   packaging fails if they do not.
+2. Commit and push to `main`.
+3. Tag and push the tag:
+
+   ```bash
+   git tag v1.2.2
+   git push origin v1.2.2
+   ```
+
+4. The [Release workflow](.github/workflows/release.yml) typechecks, tests, rebuilds the bundle,
+   validates the plugin, confirms the tag matches the manifest version, packages the ZIP, and
+   creates the GitHub release. It fails the release rather than publishing a mismatch.
+5. Download `defender-xdr-v1.2.2.zip` from the release page.
+6. Upload that ZIP under **Organization settings → Plugins** in Claude Enterprise
+   (<https://claude.ai/admin-settings/plugins>).
+
+To see exactly what will ship before tagging, run `npm run check:package`, then inspect
+`build/defender-xdr/` or load the archive with `claude --plugin-dir build/defender-xdr-v1.2.2.zip`.
+
+The ZIP contains a single `defender-xdr/` directory holding the manifest, `skills/`, the
+prebuilt `dist/server.js`, a generated `package.json`, and the docs. Claude Code accepts the
+plugin either at the archive root or inside one top-level folder, and the nested layout is easier
+to inspect. `schema-snapshot/` is absent on purpose: esbuild inlines that JSON into the bundle, so
+it is a build input rather than a runtime file. The generated `package.json` carries nothing but
+`"type": "module"` and the version, which is what tells Node to run `dist/server.js` as ESM.
 
 ## License
 

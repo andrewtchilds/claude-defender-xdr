@@ -1,4 +1,5 @@
 ---
+name: xdr-login
 description: Sign in to Microsoft Defender XDR in your browser
 allowed-tools: mcp__plugin_defender-xdr_defender-xdr__xdr_login
 ---

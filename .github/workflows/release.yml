@@ -1,0 +1,74 @@
+name: Release
+
+# Releasing is a tag push: the tag is the only input, and the packaging script refuses to build
+# unless the tag matches .claude-plugin/plugin.json, so the version lives in one place.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release and upload the ZIP to it
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # npm run verify ends in check:plugin, which is claude plugin validate.
+      - name: Install the Claude Code CLI
+        run: npm install --global @anthropic-ai/claude-code
+
+      # The same typecheck, tests, build, stale-dist, and plugin-validate chain used locally. CI
+      # already runs the tests across all three platforms on every push to main, so this job does
+      # not repeat the matrix.
+      - run: npm run verify
+
+      - name: Package the plugin
+        id: package
+        run: npm run package -- --tag "$GITHUB_REF_NAME"
+
+      # The repository root validates as a marketplace, because .claude-plugin/marketplace.json is
+      # there. The staged directory has no marketplace file, so this validates plugin.json itself,
+      # which is what the uploaded ZIP is judged as.
+      - name: Validate the packaged plugin
+        run: claude plugin validate "${{ steps.package.outputs.staging }}"
+
+      - name: Write the release notes
+        run: |
+          cat > release-notes.md <<'NOTES'
+          Download `${{ github.ref_name }}` below and upload it under
+          **Organization settings → Plugins** in Claude Enterprise.
+
+          The archive holds a single `defender-xdr/` directory with the plugin manifest, skills,
+          commands, and the prebuilt `dist/server.js`.
+          NOTES
+          printf '\nSHA-256: `%s`\n' "${{ steps.package.outputs.sha256 }}" >> release-notes.md
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.package.outputs.zip }}" \
+            --title "defender-xdr $GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-tag
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: defender-xdr-v${{ steps.package.outputs.version }}
+          path: ${{ steps.package.outputs.zip }}
+          if-no-files-found: error

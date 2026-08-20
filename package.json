@@ -13,6 +13,8 @@
     "verify": "npm run check && npm test && npm run build && npm run check:dist && npm run check:plugin",
     "check:dist": "git diff --exit-code -- dist || node -e \"console.error('dist/ is stale: run npm run build and commit dist/'); process.exit(1)\"",
     "check:plugin": "claude plugin validate .",
+    "package": "node scripts/package-plugin.mjs",
+    "check:package": "npm run package && claude plugin validate build/defender-xdr",
     "schema": "node scripts/update-schema-snapshot.mjs",
     "schema:check": "node scripts/update-schema-snapshot.mjs --check"
   },

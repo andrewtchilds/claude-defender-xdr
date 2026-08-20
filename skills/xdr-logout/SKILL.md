@@ -1,4 +1,5 @@
 ---
+name: xdr-logout
 description: Remove the cached Microsoft Defender XDR sign-in
 allowed-tools: mcp__plugin_defender-xdr_defender-xdr__xdr_logout
 ---
