@@ -95,7 +95,7 @@ describe("zip writer", () => {
     expect(entries[0].data.toString()).toBe("q");
   });
 
-  it("is byte-identical for identical input", () => {
+  it("is byte-identical when the same input is zipped twice", () => {
     const input = [{ path: "a/" }, { path: "a/b.txt", data: Buffer.from("same") }];
     expect(createZip(input).equals(createZip(input))).toBe(true);
   });

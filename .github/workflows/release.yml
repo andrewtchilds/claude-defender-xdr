@@ -52,8 +52,8 @@ jobs:
           Download `${{ github.ref_name }}` below and upload it under
           **Organization settings → Plugins** in Claude Enterprise.
 
-          The archive holds a single `defender-xdr/` directory with the plugin manifest, skills,
-          commands, and the prebuilt `dist/server.js`.
+          The archive holds a single `defender-xdr/` directory with the plugin manifest, the
+          skills, and the prebuilt `dist/server.js`.
           NOTES
           printf '\nSHA-256: `%s`\n' "${{ steps.package.outputs.sha256 }}" >> release-notes.md
 

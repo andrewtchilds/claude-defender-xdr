@@ -161,8 +161,11 @@ export function crc32(buffer) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-// A fixed 2020-01-01 timestamp, so the same input always produces a byte-identical archive and a
-// release can be reproduced and compared by digest.
+// A fixed 2020-01-01 timestamp, so a rebuild on the same machine produces a byte-identical
+// archive rather than one that differs only by mtime. Note that this does not make the digest
+// reproducible across machines: zlib's deflate output varies between versions, so the same
+// contents zipped under a different Node build give a different digest. The digest in the release
+// notes identifies the published archive, not the input.
 const DOS_TIME = 0;
 const DOS_DATE = ((2020 - 1980) << 9) | (1 << 5) | 1;
 
