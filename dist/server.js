@@ -29523,6 +29523,25 @@ import { readFile as readFile2, rm as rm3 } from "node:fs/promises";
 import { join as join3 } from "node:path";
 var CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
 var TABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+var NOT_A_TABLE = /* @__PURE__ */ new Set([
+  "alias",
+  "cluster",
+  "database",
+  "datatable",
+  "declare",
+  "evaluate",
+  "externaldata",
+  "find",
+  "join",
+  "let",
+  "materialize",
+  "print",
+  "range",
+  "search",
+  "set",
+  "toscalar",
+  "union"
+]);
 var UNDOCUMENTED = "Not in the bundled documentation snapshot";
 function liveCachePath(env = process.env) {
   return join3(stateDir(env), "schema-cache.json");
@@ -29589,6 +29608,31 @@ function mergeColumns(documented, live) {
     }),
     documentedOnly: documented.filter((column) => !liveNames.has(column.name.toLowerCase())).map((column) => column.name)
   };
+}
+function referencedTables(query, documented = []) {
+  const canonical = new Map([...documented].map((name) => [name.toLowerCase(), name]));
+  const found = /* @__PURE__ */ new Map();
+  const add = (name) => {
+    if (!name || !TABLE_NAME.test(name) || NOT_A_TABLE.has(name.toLowerCase())) return;
+    found.set(name.toLowerCase(), canonical.get(name.toLowerCase()) ?? name);
+  };
+  for (const [word] of query.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+    if (canonical.has(word.toLowerCase())) add(word);
+  }
+  add(/^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(query)?.[1]);
+  for (const match of query.matchAll(/\bunion\s+(?:[\w.]+\s*=\s*\S+\s+)*([A-Za-z_][A-Za-z0-9_]*)((?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)/gi)) {
+    add(match[1]);
+    for (const also of match[2]?.split(",") ?? []) add(also.trim());
+  }
+  for (const match of query.matchAll(/\bjoin\s+(?:[\w.]+\s*=\s*\S+\s+)*\(\s*([A-Za-z_][A-Za-z0-9_]*)/gi)) {
+    add(match[1]);
+  }
+  return [...found.values()];
+}
+async function warmTables(auth, config2, tables, options = {}) {
+  for (const table of tables) {
+    await liveColumns(auth, config2, table, options).catch(() => void 0);
+  }
 }
 async function clearLiveCache(env = process.env) {
   try {
@@ -38208,6 +38252,9 @@ function searchTables(term, includeRetired, limit = SEARCH_LIMIT) {
     matchingColumns: columns.slice(0, SEARCH_LIMIT)
   }));
 }
+function tableNames() {
+  return schema.tables.map((table) => table.name);
+}
 function suggestTables(name, limit = 5) {
   const needle = name.trim().toLowerCase();
   return schema.tables.filter((table) => table.status !== "retired").map((table) => {
@@ -38263,7 +38310,7 @@ async function exportResults(payload) {
   return path;
 }
 function createServer2() {
-  const server = new McpServer({ name: "defender-xdr", version: "1.1.0" });
+  const server = new McpServer({ name: "defender-xdr", version: "1.2.0" });
   const config2 = resettable(() => loadConfig());
   const auth = resettable(() => new Authenticator(config2()));
   server.registerTool(
@@ -38314,7 +38361,7 @@ function createServer2() {
     "xdr_run_query",
     {
       title: "Run a Defender XDR hunting query",
-      description: "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. Signs the user in through their browser automatically on first use, so call this directly rather than signing in first.",
+      description: "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. Signs the user in through their browser automatically on first use, so call this directly rather than signing in first. The tables a query reads are recorded against the tenant afterwards, so a later xdr_get_schema call describes the columns this tenant really has instead of the bundled documentation.",
       inputSchema: {
         query: external_exports.string().describe("The KQL Advanced Hunting query to run"),
         timespan: external_exports.string().optional().describe("Lookback window such as 7d, 24h, P7D, or PT24H. Defaults to the configured window."),
@@ -38330,6 +38377,7 @@ function createServer2() {
           query,
           timespan: timespan ?? resolved.defaultTimespan
         });
+        void warmTables(auth(), resolved, referencedTables(query, tableNames()));
         const limit = Math.min(max_rows ?? resolved.maxRows, resolved.maxRows);
         const rows = result.results.slice(0, limit).map(stripAnnotations);
         let text = serialize({

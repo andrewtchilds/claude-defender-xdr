@@ -74,6 +74,11 @@ export function searchTables(term: string, includeRetired: boolean, limit = SEAR
     }));
 }
 
+/** Every documented table name, for callers that need to spot one inside a query. */
+export function tableNames(): string[] {
+  return schema.tables.map(table => table.name);
+}
+
 /** Ranks by name similarity so an unknown table still produces a useful suggestion. */
 export function suggestTables(name: string, limit = 5): string[] {
   const needle = name.trim().toLowerCase();

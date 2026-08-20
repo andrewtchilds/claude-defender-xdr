@@ -9,9 +9,12 @@ import {
   liveCachePath,
   liveColumns,
   mergeColumns,
+  referencedTables,
   searchLiveCache,
   UNDOCUMENTED,
+  warmTables,
 } from "../src/live-schema.js";
+import { tableNames } from "../src/schema.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -182,6 +185,78 @@ describe("live tenant schema", () => {
 
     await expect(clearLiveCache(env)).resolves.toBe(true);
     await expect(clearLiveCache(env)).resolves.toBe(false);
+  });
+});
+
+describe("referencedTables", () => {
+  const documented = tableNames();
+  const find = (query: string) => referencedTables(query, documented);
+
+  it("names the table a query opens with", () => {
+    expect(find("DeviceProcessEvents\n| where Timestamp > ago(1d)\n| project DeviceId")).toEqual(["DeviceProcessEvents"]);
+  });
+
+  it("names both sides of a join and every branch of a union", () => {
+    expect(find("AlertInfo | join kind=inner (AlertEvidence | project AlertId) on AlertId | count").sort())
+      .toEqual(["AlertEvidence", "AlertInfo"]);
+    expect(find("union EmailEvents, EmailUrlInfo | summarize count()").sort())
+      .toEqual(["EmailEvents", "EmailUrlInfo"]);
+  });
+
+  it("names a custom table the documentation has never heard of", () => {
+    expect(find("Custom_Telemetry_CL | summarize count()")).toEqual(["Custom_Telemetry_CL"]);
+  });
+
+  it("corrects the casing to the way Microsoft spells it", () => {
+    expect(find("deviceinfo | project DeviceId")).toEqual(["DeviceInfo"]);
+  });
+
+  it("does not mistake an operator or a column for a table", () => {
+    expect(find("let cutoff = ago(1d); DeviceInfo | project DeviceId, OSPlatform")).toEqual(["DeviceInfo"]);
+    expect(find("print x = 1")).toEqual([]);
+  });
+
+  // A documented name inside a string still counts. The cost of being wrong is one probe of a
+  // table that really exists, which is cheaper than parsing KQL properly to avoid it.
+  it("counts a documented table name wherever it appears", () => {
+    expect(find('DeviceEvents | where FileName == "AlertInfo" | count').sort()).toEqual(["AlertInfo", "DeviceEvents"]);
+  });
+});
+
+describe("warmTables", () => {
+  it("caches every table it is given, so a later lookup needs no query", async () => {
+    const env = await isolatedEnv();
+    const fetchMock = stubGraph([{ name: "RiskLevelDuringSignIn", type: "Int32" }]);
+
+    await warmTables(signedIn, config(), ["EntraIdSignInEvents", "AlertInfo"], { env });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const matches = await searchLiveCache("RiskLevelDuringSignIn", config().tenantId, env);
+    expect(matches.map(match => match.table).sort()).toEqual(["AlertInfo", "EntraIdSignInEvents"]);
+  });
+
+  it("skips a table whose columns are still inside the TTL", async () => {
+    const env = await isolatedEnv();
+    const fetchMock = stubGraph([{ name: "DeviceId" }]);
+
+    await warmTables(signedIn, config(), ["DeviceInfo"], { env });
+    await warmTables(signedIn, config(), ["DeviceInfo"], { env });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps going when one table cannot be read", async () => {
+    const env = await isolatedEnv();
+    const fetchMock = vi.fn(async (url: string, init: RequestInit = {}) => {
+      const query = JSON.parse(String(init.body)).Query as string;
+      return query.startsWith("Missing")
+        ? new Response(JSON.stringify({ error: { message: "unknown table" } }), { status: 400 })
+        : new Response(JSON.stringify({ schema: [{ name: "DeviceId" }], results: [] }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(warmTables(signedIn, config(), ["MissingTable", "DeviceInfo"], { env })).resolves.toBeUndefined();
+    expect((await searchLiveCache("DeviceId", config().tenantId, env)).map(match => match.table)).toEqual(["DeviceInfo"]);
   });
 });
 

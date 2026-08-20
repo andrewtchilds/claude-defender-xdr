@@ -14,8 +14,16 @@ import {
   type Config,
 } from "./config.js";
 import { runHuntingQuery } from "./graph.js";
-import { clearLiveCache, liveColumns, mergeColumns, searchLiveCache, type LiveColumns } from "./live-schema.js";
-import { findTable, listTables, schema, searchTables, suggestTables } from "./schema.js";
+import {
+  clearLiveCache,
+  liveColumns,
+  mergeColumns,
+  referencedTables,
+  searchLiveCache,
+  warmTables,
+  type LiveColumns,
+} from "./live-schema.js";
+import { findTable, listTables, schema, searchTables, suggestTables, tableNames } from "./schema.js";
 
 /** Keeps one tool result well inside the model's context budget. */
 const MAX_OUTPUT_BYTES = 50 * 1024;
@@ -84,7 +92,7 @@ async function exportResults(payload: unknown): Promise<string> {
 }
 
 export function createServer(): McpServer {
-  const server = new McpServer({ name: "defender-xdr", version: "1.1.0" });
+  const server = new McpServer({ name: "defender-xdr", version: "1.2.0" });
 
   const config = resettable<Config>(() => loadConfig());
   const auth = resettable(() => new Authenticator(config()));
@@ -155,7 +163,7 @@ export function createServer(): McpServer {
     {
       title: "Run a Defender XDR hunting query",
       description:
-        "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. Signs the user in through their browser automatically on first use, so call this directly rather than signing in first.",
+        "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. Signs the user in through their browser automatically on first use, so call this directly rather than signing in first. The tables a query reads are recorded against the tenant afterwards, so a later xdr_get_schema call describes the columns this tenant really has instead of the bundled documentation.",
       inputSchema: {
         query: z.string().describe("The KQL Advanced Hunting query to run"),
         timespan: z
@@ -177,6 +185,15 @@ export function createServer(): McpServer {
           query,
           timespan: timespan ?? resolved.defaultTimespan,
         });
+
+        // Record what this tenant reports for the tables the query read, so the next schema
+        // question is answered from the tenant rather than from documentation that may be months
+        // old. Investigations start with a question, not a schema lookup, so waiting for someone
+        // to call xdr_get_schema first left the cache empty exactly when it was needed.
+        //
+        // Deliberately not awaited: the rows the user asked for should not wait on it. Tables
+        // still inside their TTL cost nothing, so a repeated query makes no extra calls.
+        void warmTables(auth(), resolved, referencedTables(query, tableNames()));
 
         // The configured maximum is a ceiling the caller cannot raise.
         const limit = Math.min(max_rows ?? resolved.maxRows, resolved.maxRows);

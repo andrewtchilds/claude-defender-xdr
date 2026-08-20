@@ -25,6 +25,15 @@ const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
  */
 const TABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 
+/**
+ * Words a query can open with that name no table: KQL operators and tabular-expression
+ * producers. Probing one of these would spend a call to learn that `let` is not a table.
+ */
+const NOT_A_TABLE = new Set([
+  "alias", "cluster", "database", "datatable", "declare", "evaluate", "externaldata", "find",
+  "join", "let", "materialize", "print", "range", "search", "set", "toscalar", "union",
+]);
+
 /** Said of a live column the bundled documentation has nothing to say about. */
 export const UNDOCUMENTED = "Not in the bundled documentation snapshot";
 
@@ -176,6 +185,63 @@ export function mergeColumns(
     }),
     documentedOnly: documented.filter(column => !liveNames.has(column.name.toLowerCase())).map(column => column.name),
   };
+}
+
+/**
+ * Names the tables a query reads from.
+ *
+ * Two rules, both deliberately conservative. A name already known to be a table counts wherever
+ * it appears, even inside a string, because the worst case is one probe of a table that really
+ * exists. Everything else has to sit in a position only a table can occupy, since a custom table
+ * appears in no snapshot and position is the only evidence that it is a table at all.
+ *
+ * Missing a table here is cheap: the schema tool still probes on demand. Inventing one is not,
+ * so the rules stay narrow rather than clever.
+ */
+export function referencedTables(query: string, documented: Iterable<string> = []): string[] {
+  const canonical = new Map([...documented].map(name => [name.toLowerCase(), name]));
+  const found = new Map<string, string>();
+  const add = (name: string | undefined) => {
+    if (!name || !TABLE_NAME.test(name) || NOT_A_TABLE.has(name.toLowerCase())) return;
+    found.set(name.toLowerCase(), canonical.get(name.toLowerCase()) ?? name);
+  };
+
+  for (const [word] of query.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+    if (canonical.has(word.toLowerCase())) add(word);
+  }
+  // The three shapes a table can appear in: opening the query, listed after union, or opening a
+  // join's subquery. The optional `kind=leftouter` and `hint.strategy=shuffle` are stepped over.
+  add(/^\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(query)?.[1]);
+  for (const match of query.matchAll(/\bunion\s+(?:[\w.]+\s*=\s*\S+\s+)*([A-Za-z_][A-Za-z0-9_]*)((?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)/gi)) {
+    add(match[1]);
+    for (const also of match[2]?.split(",") ?? []) add(also.trim());
+  }
+  for (const match of query.matchAll(/\bjoin\s+(?:[\w.]+\s*=\s*\S+\s+)*\(\s*([A-Za-z_][A-Za-z0-9_]*)/gi)) {
+    add(match[1]);
+  }
+  return [...found.values()];
+}
+
+/**
+ * Caches the tenant's columns for tables a query just read.
+ *
+ * This is what makes the cache useful in an ordinary investigation, where the model asks a
+ * question and gets a query rather than starting with a schema lookup. Probes run one at a time,
+ * since each rewrites the whole cache file, and a table whose columns are still inside the TTL
+ * costs nothing at all.
+ *
+ * Failures are swallowed on purpose. The rows the user asked for already came back, and the
+ * schema tool probes again on demand.
+ */
+export async function warmTables(
+  auth: Authenticator,
+  config: Config,
+  tables: string[],
+  options: { env?: NodeJS.ProcessEnv } = {},
+): Promise<void> {
+  for (const table of tables) {
+    await liveColumns(auth, config, table, options).catch(() => undefined);
+  }
 }
 
 /** Drops every cached tenant column, so signing out leaves no tenant metadata behind. */

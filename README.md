@@ -17,25 +17,29 @@ The plugin adds four tools to Claude Code:
 | --- | --- |
 | `xdr_run_query` | Runs a read-only KQL query against Advanced Hunting. |
 | `xdr_get_schema` | Looks up hunting tables and columns, checked against your own tenant. |
-| `xdr_login` | Opens your browser to sign in. Optional — querying signs you in on its own. |
+| `xdr_login` | Opens your browser to sign in. Optional, since querying signs you in on its own. |
 | `xdr_logout` | Removes the sign-in cached on this machine. |
 
-Table lookups answer from a snapshot of Microsoft's published schema that ships with the
-plugin, and — when you are signed in — from your tenant itself. Describing a table runs one
-zero-row query against it and caches the column list for a week, so preview columns, custom
-tables, and anything newer than the documentation show up as they really are, with the columns
-the docs claim but your tenant does not return listed separately. Pass `live: false` to stay
-offline, or `refresh: true` to re-ask sooner.
+Table lookups draw on two sources. One is a snapshot of Microsoft's published schema that ships
+with the plugin. The other is your tenant, which the plugin asks directly whenever you are
+signed in.
 
-It also installs four investigation skills — cross-domain, endpoint, identity, and messaging —
-that teach Claude how to scope an investigation, pick the cheapest table, and pivot on
-indicators rather than dumping raw events.
+Describing a table runs one zero-row query against it and caches the columns for a week.
+Running a hunting query does the same for every table that query read, so the tenant's real
+columns are on disk before you think to ask. Preview columns, custom tables, and anything newer
+than the documentation therefore appear as they are, and any column the docs claim while your
+tenant does not return it gets listed on its own. Pass `live: false` to stay offline, or
+`refresh: true` to ask again before the week is up.
+
+The plugin also installs four investigation skills, one for cross-domain work and one each for
+endpoint, identity, and messaging. They teach Claude to scope an investigation, pick the
+cheapest table, and pivot on indicators instead of dumping raw events.
 
 Everything is read-only. Advanced Hunting cannot modify tenant state, and the only permission
 requested is the read-only `ThreatHunting.Read.All`.
 
-[`docs/architecture.md`](docs/architecture.md) diagrams how the pieces fit together: the query
-path, the sign-in flow, and the guardrails.
+[`docs/architecture.md`](docs/architecture.md) has diagrams of the query path, the two schema
+sources, and the sign-in flow.
 
 ## Setup
 
@@ -57,7 +61,7 @@ Copy the **Directory (tenant) ID** and **Application (client) ID** from the Over
 Neither is a secret, and this plugin never uses a client secret.
 
 Each person who uses the plugin also needs a Defender XDR role that permits Advanced Hunting.
-The app registration grants the app's ability to ask; their role decides what they can see.
+The app registration grants the app's ability to ask. Their role decides what they can see.
 
 ### 2. Install the plugin
 
@@ -68,13 +72,13 @@ In Claude Code:
 /plugin install defender-xdr@claude-defender-xdr
 ```
 
-Or run `/plugin`, pick **defender-xdr** on the **Discover** tab, and choose a scope — **User**
-for yourself, **Project** to share it with a repository, **Local** for this repository only.
-The details pane's **Will install** list names every tool, skill, and MCP server the plugin
-adds before you agree to it.
+Or run `/plugin`, pick **defender-xdr** on the **Discover** tab, and choose a scope. **User**
+installs it for you, **Project** shares it with a repository, **Local** keeps it to this
+repository. The details pane's **Will install** list names every tool, skill, and MCP server the
+plugin adds before you agree to it.
 
-Claude Code then offers to collect the tenant ID and application ID. Both are optional here:
-whatever you leave blank, sign-in asks for and saves. If the install summary says
+Claude Code then offers to collect the tenant ID and application ID. Both are optional here,
+and sign-in asks for whatever you leave blank. If the install summary says
 `Run /reload-plugins to activate.`, run that.
 
 ### 3. Ask a question
@@ -85,56 +89,56 @@ There is no separate sign-in step. Ask something:
 > which devices ran encoded powershell in the last 24 hours?
 ```
 
-The first query opens your browser, you complete the normal Microsoft sign-in including MFA,
-and the tab tells you when to come back. The query then runs and answers.
+The first query opens your browser, you complete the normal Microsoft sign-in including MFA, and
+the tab tells you when to come back. The query then runs and answers.
 
-The sign-in is cached, so you normally do this once. Microsoft decides when it expires; when
-that happens, the next query signs you in again. To sign in ahead of time, switch account, or
-change tenant, run `/defender-xdr:xdr-login`.
+The sign-in is cached, so you normally do this once. Microsoft decides when it expires, and the
+next query after that signs you in again. To sign in ahead of time, switch account, or change
+tenant, run `/defender-xdr:xdr-login`.
 
 If you skipped both IDs at install, the first query reports that the plugin is not configured.
-Give Claude the two GUIDs when it asks — they are saved and applied immediately, with no
-restart.
+Give Claude the two GUIDs when it asks. They are saved and applied immediately, with no restart.
 
 ## Configuration
 
 | Setting | Default | Notes |
 | --- | --- | --- |
-| Entra tenant ID | — | Required. Set at install, or by sign-in. |
-| Entra application (client) ID | — | Required. Set at install, or by sign-in. |
+| Entra tenant ID | none | Required. Set at install, or by sign-in. |
+| Entra application (client) ID | none | Required. Set at install, or by sign-in. |
 | Microsoft Graph endpoint | `https://graph.microsoft.com` | Change only for sovereign clouds. |
-| Maximum rows per query | 1000 | A hard ceiling; Claude cannot raise it per query. |
+| Maximum rows per query | 1000 | A hard ceiling. Claude cannot raise it per query. |
 | Default lookback window | `7d` | Used when your question implies no time range. |
 
-Settings live in the **Installed** tab of `/plugin`. The two identifiers can also be set — and
-changed — by running `/defender-xdr:xdr-login`, which works everywhere.
+Settings live in the **Installed** tab of `/plugin`. You can also set or change the two
+identifiers by running `/defender-xdr:xdr-login`, which works everywhere.
 
 ## Where things are stored
 
-A `claude-defender-xdr` folder in your user configuration directory — `~/.config` on macOS and
-Linux, `%APPDATA%` on Windows — holds:
+A `claude-defender-xdr` folder in your user configuration directory holds the files below. That
+is `~/.config` on macOS and Linux, `%APPDATA%` on Windows.
 
-- `config.json` — the tenant and application IDs saved by sign-in
-- `token.json` — the refresh token and the signed-in username
-- `schema-cache.json` — the columns your tenant reports for the tables you have looked up
-- `exports/` — full result sets, written only when you explicitly ask Claude to export
+- `config.json` holds the tenant and application IDs saved by sign-in
+- `token.json` holds the refresh token and the signed-in username
+- `schema-cache.json` holds the columns your tenant reports for the tables you have queried or
+  looked up
+- `exports/` holds full result sets, written only when you explicitly ask Claude to export
 
 Every file is readable only by your own account. Delete the folder, or run
 `/defender-xdr:xdr-logout`, to remove the cached sign-in and the cached tenant schema.
 
 ## Troubleshooting
 
-**"Defender XDR is not configured"** — run `/defender-xdr:xdr-login` and give Claude the two
+**"Defender XDR is not configured".** Run `/defender-xdr:xdr-login` and give Claude the two
 GUIDs when it asks. They are saved and applied immediately.
 
-**"Access denied" (403)** — admin consent was not granted for `ThreatHunting.Read.All`, or
-your account lacks a Defender XDR role permitting Advanced Hunting.
+**"Access denied" (403).** Admin consent was not granted for `ThreatHunting.Read.All`, or your
+account lacks a Defender XDR role permitting Advanced Hunting.
 
-**Sign-in fails with AADSTS7000218 or a redirect error** — the app registration is not a
-public client. Enable **Allow public client flows** and confirm `http://localhost` is
-registered under **Mobile and desktop applications**.
+**Sign-in fails with AADSTS7000218 or a redirect error.** The app registration is not a public
+client. Enable **Allow public client flows** and confirm `http://localhost` is registered under
+**Mobile and desktop applications**.
 
-**The browser never opens** — the tool prints the failure. On Linux, install `xdg-utils`.
+**The browser never opens.** The tool prints the failure. On Linux, install `xdg-utils`.
 
 ## Development
 
@@ -145,16 +149,15 @@ npm run schema        # rebuild the bundled schema snapshot from Microsoft's doc
 npm run schema:check  # report drift against the docs without writing
 ```
 
-`src/` is bundled by esbuild into a single `dist/server.js`, which is committed. Claude Code
-installs plugins by cloning, with no install or build step, so the server must run straight
-from the repository with no `node_modules` present. Rebuild and commit `dist/` with any
-change to `src/`.
+esbuild bundles `src/` into a single `dist/server.js`, which is committed. Claude Code installs
+plugins by cloning, with no install or build step, so the server has to run straight from the
+repository with no `node_modules` present. Rebuild and commit `dist/` with any change to `src/`.
 
-The bundled schema snapshot is generated, not hand-edited. `npm run schema` reads Microsoft's
+The bundled schema snapshot is generated, never hand-edited. `npm run schema` reads Microsoft's
 own documentation source, pins the commit it read, and rewrites
-`schema-snapshot/defender-xdr-schema.json` — so the diff on that file is exactly what Microsoft
-changed. Table retirements are announced in prose rather than in the schema tables, so the
-script carries a short curated list of them and warns when an entry no longer matches the docs.
+`schema-snapshot/defender-xdr-schema.json`, so the diff on that file is exactly what Microsoft
+changed. Microsoft announces table retirements in prose rather than in the schema tables, so the
+script carries a short curated list of them and warns when an entry stops matching the docs.
 
 ## License
 

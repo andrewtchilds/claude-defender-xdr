@@ -51,16 +51,27 @@ function stubNetwork(hunting: () => Response) {
 const tenantColumns = (columns: { name: string; type: string }[]) => () =>
   new Response(JSON.stringify({ schema: columns, results: [] }), { status: 200 });
 
-async function connect(): Promise<(args: Record<string, unknown>) => Promise<string>> {
+async function connect(): Promise<(tool: string, args: Record<string, unknown>) => Promise<string>> {
   const client = new Client({ name: "test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([client.connect(clientTransport), createServer().connect(serverTransport)]);
-  return async args => {
-    const result = (await client.callTool({ name: "xdr_get_schema", arguments: args })) as {
-      content: { text: string }[];
-    };
+  return async (tool, args) => {
+    const result = (await client.callTool({ name: tool, arguments: args })) as { content: { text: string }[] };
     return result.content[0]!.text;
   };
+}
+
+/**
+ * Waits for schema warming, which xdr_run_query starts and deliberately does not await so that
+ * a query is never slowed down by it. Everything is mocked here, so this resolves in a tick or
+ * two; the deadline only keeps a broken build from hanging.
+ */
+async function eventually(condition: () => Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    if (await condition()) return;
+    await new Promise(done => setTimeout(done, 5));
+  }
+  throw new Error("condition never became true");
 }
 
 describe("xdr_get_schema against a tenant", () => {
@@ -71,7 +82,7 @@ describe("xdr_get_schema against a tenant", () => {
     );
     const getSchema = await connect();
 
-    const text = await getSchema({ table: "DeviceInfo" });
+    const text = await getSchema("xdr_get_schema", { table: "DeviceInfo" });
 
     expect(text).toContain("BrandNewColumn");
     expect(text).toContain("Not in the bundled documentation snapshot");
@@ -86,8 +97,8 @@ describe("xdr_get_schema against a tenant", () => {
     stubNetwork(tenantColumns([{ name: "DeviceId", type: "String" }]));
     const getSchema = await connect();
 
-    await getSchema({ table: "DeviceInfo" });
-    expect(await getSchema({ table: "DeviceInfo" })).toContain('"fromCache": true');
+    await getSchema("xdr_get_schema", { table: "DeviceInfo" });
+    expect(await getSchema("xdr_get_schema", { table: "DeviceInfo" })).toContain('"fromCache": true');
   });
 
   it("describes a table that exists in the tenant but not in the documentation", async () => {
@@ -95,7 +106,7 @@ describe("xdr_get_schema against a tenant", () => {
     stubNetwork(tenantColumns([{ name: "TimeGenerated", type: "DateTime" }]));
     const getSchema = await connect();
 
-    const text = await getSchema({ table: "Custom_Telemetry_CL" });
+    const text = await getSchema("xdr_get_schema", { table: "Custom_Telemetry_CL" });
 
     expect(text).toContain('"status": "tenant-only"');
     expect(text).toContain("TimeGenerated");
@@ -106,7 +117,7 @@ describe("xdr_get_schema against a tenant", () => {
     stubNetwork(() => new Response(JSON.stringify({ error: { message: "bad request" } }), { status: 400 }));
     const getSchema = await connect();
 
-    const text = await getSchema({ table: "DeviceInfo" });
+    const text = await getSchema("xdr_get_schema", { table: "DeviceInfo" });
 
     expect(text).toContain("DeviceId");
     expect(text).toContain('"status": "unavailable"');
@@ -119,7 +130,7 @@ describe("xdr_get_schema against a tenant", () => {
     const fetchMock = stubNetwork(tenantColumns([]));
     const getSchema = await connect();
 
-    const text = await getSchema({ table: "DeviceInfo" });
+    const text = await getSchema("xdr_get_schema", { table: "DeviceInfo" });
 
     expect(text).toContain("not configured yet");
     expect(text).not.toContain("GUIDs");
@@ -132,7 +143,7 @@ describe("xdr_get_schema against a tenant", () => {
     const fetchMock = stubNetwork(tenantColumns([{ name: "DeviceId", type: "String" }]));
     const getSchema = await connect();
 
-    const text = await getSchema({ table: "DeviceInfo", live: false });
+    const text = await getSchema("xdr_get_schema", { table: "DeviceInfo", live: false });
 
     expect(text).toContain("DeviceId");
     expect(text).not.toContain("liveVerification");
@@ -143,10 +154,10 @@ describe("xdr_get_schema against a tenant", () => {
     await signedIn();
     const fetchMock = stubNetwork(tenantColumns([{ name: "RiskLevelDuringSignIn", type: "Int32" }]));
     const getSchema = await connect();
-    await getSchema({ table: "EntraIdSignInEvents" });
+    await getSchema("xdr_get_schema", { table: "EntraIdSignInEvents" });
     const callsAfterDescribe = fetchMock.mock.calls.length;
 
-    const text = await getSchema({ search: "risk level during" });
+    const text = await getSchema("xdr_get_schema", { search: "risk level during" });
 
     expect(text).toContain("cachedTenantMatches");
     expect(text).toContain("RiskLevelDuringSignIn");
@@ -158,16 +169,42 @@ describe("xdr_get_schema against a tenant", () => {
     stubNetwork(() => new Response(JSON.stringify({ error: { message: "unknown table" } }), { status: 400 }));
     const getSchema = await connect();
 
-    const text = await getSchema({ table: "DeviceProcess" });
+    const text = await getSchema("xdr_get_schema", { table: "DeviceProcess" });
 
     expect(text).toContain('Unknown Defender XDR table "DeviceProcess"');
     expect(text).toContain("DeviceProcessEvents");
   });
 
+  // The bug this feature exists to prevent: a session ran a hunting query, nothing warmed the
+  // cache, and the next schema question fell back to documentation months out of date.
+  it("caches the columns of the tables a hunting query read", async () => {
+    await signedIn();
+    const fetchMock = vi.fn(async (url: string, init: RequestInit = {}) => {
+      if (url.includes("/oauth2/v2.0/token")) {
+        return new Response(JSON.stringify({ access_token: "access", expires_in: 3600 }), { status: 200 });
+      }
+      const query = JSON.parse(String(init.body)).Query as string;
+      return query.endsWith("| take 0")
+        ? new Response(JSON.stringify({ schema: [{ name: "RiskLevelDuringSignIn", type: "Int32" }], results: [] }), { status: 200 })
+        : new Response(JSON.stringify({ schema: [{ name: "Total", type: "Int64" }], results: [{ Total: 3 }] }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const call = await connect();
+
+    await call("xdr_run_query", { query: "EntraIdSignInEvents | summarize Total = count()" });
+
+    // The warming probe is not awaited by the query, so wait for it to land.
+    await eventually(async () => (await call("xdr_get_schema", { search: "risk level during" })).includes("cachedTenantMatches"));
+    const searched = await call("xdr_get_schema", { search: "risk level during" });
+    expect(searched).toContain("RiskLevelDuringSignIn");
+    expect(searched).toContain("EntraIdSignInEvents");
+    expect(fetchMock.mock.calls.filter(([, init]) => String(init?.body).includes("take 0")).length).toBe(1);
+  });
+
   it("rejects refresh without a table, and table with search", async () => {
     const getSchema = await connect();
 
-    expect(await getSchema({ refresh: true })).toContain("refresh applies only to an exact table");
-    expect(await getSchema({ table: "DeviceInfo", search: "device" })).toContain("Pass either table or search");
+    expect(await getSchema("xdr_get_schema", { refresh: true })).toContain("refresh applies only to an exact table");
+    expect(await getSchema("xdr_get_schema", { table: "DeviceInfo", search: "device" })).toContain("Pass either table or search");
   });
 });
