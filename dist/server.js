@@ -38263,7 +38263,7 @@ async function exportResults(payload) {
   return path;
 }
 function createServer2() {
-  const server = new McpServer({ name: "defender-xdr", version: "1.0.0" });
+  const server = new McpServer({ name: "defender-xdr", version: "1.1.0" });
   const config2 = resettable(() => loadConfig());
   const auth = resettable(() => new Authenticator(config2()));
   server.registerTool(

@@ -84,7 +84,7 @@ async function exportResults(payload: unknown): Promise<string> {
 }
 
 export function createServer(): McpServer {
-  const server = new McpServer({ name: "defender-xdr", version: "1.0.0" });
+  const server = new McpServer({ name: "defender-xdr", version: "1.1.0" });
 
   const config = resettable<Config>(() => loadConfig());
   const auth = resettable(() => new Authenticator(config()));
