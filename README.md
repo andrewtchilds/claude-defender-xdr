@@ -163,12 +163,11 @@ script carries a short curated list of them and warns when an entry stops matchi
 
 ## Releasing
 
-Releases exist so the plugin can be uploaded to a Claude Enterprise organizational marketplace,
-which does not sync from GitHub. GitHub stays the source of truth; the release ZIP is just the
-artifact you hand to Claude.
+Claude Enterprise does not sync plugins from GitHub, so an admin uploads a ZIP by hand. Pushing a
+version tag builds that ZIP. GitHub stays the source of truth.
 
-1. Bump `version` in `.claude-plugin/plugin.json` and in `package.json`. The two have to agree, and
-   packaging fails if they do not.
+1. Bump `version` in `.claude-plugin/plugin.json` and in `package.json`. Packaging fails if the two
+   disagree.
 2. Commit and push to `main`.
 3. Tag and push the tag:
 
@@ -178,21 +177,28 @@ artifact you hand to Claude.
    ```
 
 4. The [Release workflow](.github/workflows/release.yml) typechecks, tests, rebuilds the bundle,
-   validates the plugin, confirms the tag matches the manifest version, packages the ZIP, and
-   creates the GitHub release. It fails the release rather than publishing a mismatch.
+   and validates the plugin. Then it checks the tag against the manifest version, packages the ZIP,
+   and creates the GitHub release. A mismatch fails the run instead of publishing.
 5. Download `defender-xdr-v1.2.2.zip` from the release page.
 6. Upload that ZIP under **Organization settings → Plugins** in Claude Enterprise
    (<https://claude.ai/admin-settings/plugins>).
 
-To see exactly what will ship before tagging, run `npm run check:package`, then inspect
+To see what will ship before tagging, run `npm run check:package`, then look through
 `build/defender-xdr/` or load the archive with `claude --plugin-dir build/defender-xdr-v1.2.2.zip`.
 
-The ZIP contains a single `defender-xdr/` directory holding the manifest, `skills/`, the
-prebuilt `dist/server.js`, a generated `package.json`, and the docs. Claude Code accepts the
-plugin either at the archive root or inside one top-level folder, and the nested layout is easier
-to inspect. `schema-snapshot/` is absent on purpose: esbuild inlines that JSON into the bundle, so
-it is a build input rather than a runtime file. The generated `package.json` carries nothing but
-`"type": "module"` and the version, which is what tells Node to run `dist/server.js` as ESM.
+The ZIP holds one `defender-xdr/` directory: the manifest, `skills/`, the prebuilt
+`dist/server.js`, a generated `package.json`, and the docs. Claude Code reads the plugin from the
+archive root or from one top-level folder, and the nested layout is easier to inspect.
+
+Two of those entries are easy to get wrong. The generated `package.json` carries only
+`"type": "module"` and the version. That is what tells Node to run `dist/server.js` as ESM, and
+without it Node reads the bundle as CommonJS and the server dies on its first `import`.
+`schema-snapshot/` goes the other way and stays out, because esbuild inlines that JSON into the
+bundle and nothing reads the file at runtime.
+
+Rebuilding a tag on a different Node version gives a different archive digest, because zlib's
+deflate output changes between versions. The extracted files still match. The digest in the release
+notes names the published archive, not its input.
 
 ## License
 
