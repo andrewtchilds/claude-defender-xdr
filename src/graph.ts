@@ -48,7 +48,10 @@ function retryAfterMs(header: string | null): number | undefined {
 function explain(status: number): string {
   switch (status) {
     case 400:
-      return "Defender XDR rejected the KQL query";
+      // A rejected query is most often a column or table this tenant does not have, which is
+      // exactly what a live schema lookup settles — so name the tool instead of leaving the
+      // model to guess at another spelling.
+      return "Defender XDR rejected the KQL query; if a table or column may not exist in this tenant, check it with xdr_get_schema before retrying";
     case 401:
       return "Microsoft rejected the access token; sign in again with the xdr_login tool";
     case 403:
@@ -86,11 +89,13 @@ const sleep = (ms: number, signal: AbortSignal) =>
 export async function runHuntingQuery(
   auth: Authenticator,
   config: Config,
-  input: { query: string; timespan?: string },
+  input: { query: string; timespan?: string; silent?: boolean },
 ): Promise<HuntingResult> {
   if (!input.query.trim()) throw new Error("The KQL query must not be empty");
 
-  const token = await auth.accessTokenReady();
+  // Queries the user asked for may open a browser to sign in; queries the plugin runs on its
+  // own behalf — the zero-row schema probe — must not, so they pass `silent`.
+  const token = input.silent ? await auth.accessTokenSilent() : await auth.accessTokenReady();
   const body = JSON.stringify({
     Query: input.query,
     ...(input.timespan ? { Timespan: normalizeTimespan(input.timespan) } : {}),

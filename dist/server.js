@@ -21093,7 +21093,7 @@ var StdioServerTransport = class {
 
 // src/server.ts
 import { randomUUID } from "node:crypto";
-import { join as join3 } from "node:path";
+import { join as join4 } from "node:path";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -29038,7 +29038,7 @@ import { join as join2 } from "node:path";
 import { readFileSync } from "node:fs";
 import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 var GRAPH_CLOUDS = /* @__PURE__ */ new Map([
   ["https://graph.microsoft.com", "https://login.microsoftonline.com"],
   ["https://graph.microsoft.us", "https://login.microsoftonline.us"],
@@ -29079,6 +29079,13 @@ async function replaceFile(temp, path) {
       await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
     }
   }
+}
+async function saveOwnerOnlyJson(path, value) {
+  await makeOwnerOnlyDir(dirname(path));
+  const temp = `${path}.${process.pid}.tmp`;
+  await writeOwnerOnlyFile(temp, `${JSON.stringify(value, null, 2)}
+`);
+  await replaceFile(temp, path);
 }
 var NotConfiguredError = class extends Error {
   constructor(missing) {
@@ -29128,12 +29135,8 @@ async function saveStoredConfig(values, env = process.env) {
     tenantId: guid3(values.tenantId, "tenant ID"),
     clientId: guid3(values.clientId, "application (client) ID")
   };
-  await makeOwnerOnlyDir(stateDir(env));
   const path = configPath(env);
-  const temp = `${path}.${process.pid}.tmp`;
-  await writeOwnerOnlyFile(temp, `${JSON.stringify(stored, null, 2)}
-`);
-  await replaceFile(temp, path);
+  await saveOwnerOnlyJson(path, stored);
   return path;
 }
 function loadConfig(env = process.env, stored = readStoredConfig(env)) {
@@ -29436,7 +29439,7 @@ function retryAfterMs(header) {
 function explain(status) {
   switch (status) {
     case 400:
-      return "Defender XDR rejected the KQL query";
+      return "Defender XDR rejected the KQL query; if a table or column may not exist in this tenant, check it with xdr_get_schema before retrying";
     case 401:
       return "Microsoft rejected the access token; sign in again with the xdr_login tool";
     case 403:
@@ -29465,7 +29468,7 @@ var sleep = (ms, signal) => new Promise((resolve, reject) => {
 });
 async function runHuntingQuery(auth, config2, input) {
   if (!input.query.trim()) throw new Error("The KQL query must not be empty");
-  const token = await auth.accessTokenReady();
+  const token = input.silent ? await auth.accessTokenSilent() : await auth.accessTokenReady();
   const body = JSON.stringify({
     Query: input.query,
     ...input.timespan ? { Timespan: normalizeTimespan(input.timespan) } : {}
@@ -29512,6 +29515,87 @@ async function runHuntingQuery(auth, config2, input) {
       throw new Error(detail ? `${explain(response.status)}: ${detail}` : explain(response.status));
     }
     return assertShape(parsed);
+  }
+}
+
+// src/live-schema.ts
+import { readFile as readFile2, rm as rm3 } from "node:fs/promises";
+import { join as join3 } from "node:path";
+var CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
+var TABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+var UNDOCUMENTED = "Not in the bundled documentation snapshot";
+function liveCachePath(env = process.env) {
+  return join3(stateDir(env), "schema-cache.json");
+}
+async function readCache(tenantId, env) {
+  const empty = { version: 1, tenantId, tables: {} };
+  let parsed;
+  try {
+    parsed = JSON.parse(await readFile2(liveCachePath(env), "utf8"));
+  } catch {
+    return empty;
+  }
+  if (!parsed || typeof parsed !== "object") return empty;
+  const { version: version2, tenantId: cachedTenant, tables } = parsed;
+  if (version2 !== 1 || cachedTenant !== tenantId) return empty;
+  if (!tables || typeof tables !== "object" || Array.isArray(tables)) return empty;
+  return { version: 1, tenantId, tables };
+}
+async function liveColumns(auth, config2, table, options = {}) {
+  const name = table.trim();
+  if (!TABLE_NAME.test(name)) {
+    throw new Error(`"${table}" is not a Defender XDR table name, so the tenant was not asked`);
+  }
+  const env = options.env ?? process.env;
+  const cache = await readCache(config2.tenantId, env);
+  const key = name.toLowerCase();
+  const cached2 = cache.tables[key];
+  if (!options.refresh && cached2 && Date.now() - Date.parse(cached2.fetchedAt) < CACHE_TTL_MS) {
+    return { columns: cached2.columns, fetchedAt: cached2.fetchedAt, cached: true };
+  }
+  const result = await runHuntingQuery(auth, config2, {
+    query: `${name}
+| take 0`,
+    timespan: config2.defaultTimespan,
+    silent: true
+  });
+  const fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
+  cache.tables[key] = { name, fetchedAt, columns: result.schema };
+  await saveOwnerOnlyJson(liveCachePath(env), cache);
+  return { columns: result.schema, fetchedAt, cached: false };
+}
+async function searchLiveCache(term, tenantId, env = process.env, limit = 20) {
+  const terms = term.toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return [];
+  const matchesAll = (haystack) => terms.every((needle) => haystack.includes(needle));
+  const cache = await readCache(tenantId, env);
+  return Object.values(cache.tables).map((table) => ({
+    table: table.name,
+    fetchedAt: table.fetchedAt,
+    matchingColumns: table.columns.filter((column) => matchesAll(column.name.toLowerCase()))
+  })).filter((match) => match.matchingColumns.length > 0 || matchesAll(match.table.toLowerCase())).sort((a, b) => b.matchingColumns.length - a.matchingColumns.length).slice(0, limit);
+}
+function mergeColumns(documented, live) {
+  const byName = new Map(documented.map((column) => [column.name.toLowerCase(), column]));
+  const liveNames = new Set(live.map((column) => column.name.toLowerCase()));
+  return {
+    columns: live.map((column) => {
+      const match = byName.get(column.name.toLowerCase());
+      return {
+        name: column.name,
+        type: column.type ?? match?.type ?? "unknown",
+        description: match?.description ?? UNDOCUMENTED
+      };
+    }),
+    documentedOnly: documented.filter((column) => !liveNames.has(column.name.toLowerCase())).map((column) => column.name)
+  };
+}
+async function clearLiveCache(env = process.env) {
+  try {
+    await rm3(liveCachePath(env));
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -38159,10 +38243,21 @@ var failed = (error46) => ({
 function stripAnnotations(row) {
   return Object.fromEntries(Object.entries(row).filter(([key]) => !key.endsWith("@odata.type")));
 }
+function describeVerification(verified) {
+  return "live" in verified ? {
+    verifiedAt: verified.live.fetchedAt,
+    fromCache: verified.live.cached,
+    tenantColumns: verified.live.columns.length
+  } : {
+    status: "unavailable",
+    reason: verified.unavailable,
+    note: "The columns above are from the bundled documentation snapshot, which can lag your tenant."
+  };
+}
 async function exportResults(payload) {
-  const directory = join3(stateDir(), "exports");
+  const directory = join4(stateDir(), "exports");
   await makeOwnerOnlyDir(directory);
-  const path = join3(directory, `hunting-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}-${randomUUID()}.json`);
+  const path = join4(directory, `hunting-${(/* @__PURE__ */ new Date()).toISOString().replace(/[:.]/g, "-")}-${randomUUID()}.json`);
   await writeOwnerOnlyFile(path, `${JSON.stringify(payload, null, 2)}
 `);
   return path;
@@ -38205,13 +38300,13 @@ function createServer2() {
     "xdr_logout",
     {
       title: "Sign out of Defender XDR",
-      description: "Delete the Defender XDR sign-in cached on this machine. This does not revoke the Entra session in the browser or sign the user out of other applications.",
+      description: "Delete the Defender XDR sign-in cached on this machine, along with any tenant schema cached from it. This does not revoke the Entra session in the browser or sign the user out of other applications.",
       inputSchema: {}
     },
     async () => {
-      const removed = await clearStoredToken();
+      const [removed, cacheRemoved] = await Promise.all([clearStoredToken(), clearLiveCache()]);
       return ok(
-        removed ? "Removed the cached Defender XDR sign-in from this machine. The browser session with Microsoft is untouched." : "No Defender XDR sign-in was cached on this machine."
+        (removed ? "Removed the cached Defender XDR sign-in from this machine. The browser session with Microsoft is untouched." : "No Defender XDR sign-in was cached on this machine.") + (cacheRemoved ? " The cached tenant schema was deleted as well." : "")
       );
     }
   );
@@ -38256,41 +38351,78 @@ function createServer2() {
       }
     }
   );
+  async function verifyAgainstTenant(table, refresh) {
+    try {
+      return { live: await liveColumns(auth(), config2(), table, { refresh }) };
+    } catch (error46) {
+      if (error46 instanceof NotConfiguredError) return { unavailable: "the plugin is not configured yet" };
+      return { unavailable: error46 instanceof Error ? error46.message : String(error46) };
+    }
+  }
+  function tenantId() {
+    try {
+      return config2().tenantId;
+    } catch {
+      return void 0;
+    }
+  }
   server.registerTool(
     "xdr_get_schema",
     {
       title: "Look up Defender XDR tables and columns",
-      description: "List, search, or describe Defender XDR Advanced Hunting tables and their columns from the bundled official schema. Works without signing in. Use it before writing a query that relies on an uncertain table or column.",
+      description: "List, search, or describe Defender XDR Advanced Hunting tables and their columns. Describing an exact table also verifies its columns against the signed-in tenant with a zero-row query, cached for a week, so tenant-specific, preview, and newly added columns show up next to the bundled documentation; pass live=false to stay offline. Listing and searching read local files only. Use it before writing a query that leans on an uncertain table or column.",
       inputSchema: {
         table: external_exports.string().optional().describe("Exact table name to describe, such as DeviceProcessEvents"),
         search: external_exports.string().optional().describe("Substring to match against table and column names and descriptions"),
-        include_retired: external_exports.boolean().optional().describe("Include tables Microsoft has retired")
+        include_retired: external_exports.boolean().optional().describe("Include tables Microsoft has retired"),
+        live: external_exports.boolean().optional().describe(
+          "Verify an exact table's columns against the signed-in tenant. Defaults to true; pass false for the bundled documentation alone."
+        ),
+        refresh: external_exports.boolean().optional().describe("Ignore the cached tenant columns for this table and ask the tenant again")
       },
       annotations: { readOnlyHint: true }
     },
-    async ({ table, search, include_retired = false }) => {
+    async ({ table, search, include_retired = false, live = true, refresh = false }) => {
       try {
         if (table && search) throw new Error("Pass either table or search, not both");
+        if (refresh && !table) throw new Error("refresh applies only to an exact table");
         if (table) {
-          const found = findTable(table);
-          if (!found) {
+          const documented = findTable(table);
+          const verified = live ? await verifyAgainstTenant(table, refresh) : void 0;
+          const tenant = verified && "live" in verified ? verified.live : void 0;
+          if (!documented && !tenant) {
             throw new Error(
-              `Unknown Defender XDR table "${table}". Closest names: ${suggestTables(table).join(", ")}`
+              `Unknown Defender XDR table "${table}". Closest documented names: ${suggestTables(table).join(", ")}` + (verified && "unavailable" in verified ? `. The tenant could not be asked: ${verified.unavailable}` : "")
             );
           }
+          const merged = tenant ? mergeColumns(documented?.columns ?? [], tenant.columns) : void 0;
           return ok(
             serialize({
-              name: found.name,
-              description: found.description,
-              status: found.status,
-              ...found.replacedBy ? { replacedBy: found.replacedBy, retirementDate: found.retirementDate } : {},
-              documentationUrl: found.documentationUrl,
-              columns: found.columns
+              name: documented?.name ?? table,
+              description: documented?.description ?? "Present in your tenant; absent from the bundled documentation snapshot.",
+              status: documented?.status ?? "tenant-only",
+              ...documented?.replacedBy ? { replacedBy: documented.replacedBy, retirementDate: documented.retirementDate } : {},
+              ...documented ? { documentationUrl: documented.documentationUrl } : {},
+              columns: merged?.columns ?? documented?.columns ?? [],
+              // Documented columns the tenant did not return: retired, unlicensed, or not yet
+              // rolled out here. Naming them stops a query being built on one of them.
+              ...merged?.documentedOnly.length ? { documentedNotInTenant: merged.documentedOnly } : {},
+              ...verified ? { liveVerification: describeVerification(verified) } : {}
             })
           );
         }
         if (search) {
-          return ok(serialize({ search, matches: searchTables(search, include_retired) }));
+          const tenant = tenantId();
+          const cachedTenantMatches = tenant ? await searchLiveCache(search, tenant) : [];
+          return ok(
+            serialize({
+              search,
+              matches: searchTables(search, include_retired),
+              // Columns cached by an earlier live lookup, matched from disk: no query is sent,
+              // and these can include columns the documentation snapshot has never heard of.
+              ...cachedTenantMatches.length ? { cachedTenantMatches } : {}
+            })
+          );
         }
         return ok(
           serialize({

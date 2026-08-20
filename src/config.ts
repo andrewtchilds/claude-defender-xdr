@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 /**
  * Graph endpoints this plugin will talk to, each mapped to the Entra login host that
@@ -110,6 +110,20 @@ async function replaceFile(temp: string, path: string): Promise<void> {
   }
 }
 
+/**
+ * Writes JSON that only its owner can read, atomically.
+ *
+ * Everything this plugin keeps on disk is written this way: a temp file first, then a rename
+ * over the destination, so an interrupted save leaves the previous file intact rather than a
+ * half-written one that would read as corrupt on the next start.
+ */
+export async function saveOwnerOnlyJson(path: string, value: unknown): Promise<void> {
+  await makeOwnerOnlyDir(dirname(path));
+  const temp = `${path}.${process.pid}.tmp`;
+  await writeOwnerOnlyFile(temp, `${JSON.stringify(value, null, 2)}\n`);
+  await replaceFile(temp, path);
+}
+
 export class NotConfiguredError extends Error {
   constructor(missing: string) {
     super(
@@ -178,7 +192,7 @@ export function readStoredConfig(env: NodeJS.ProcessEnv = process.env): StoredCo
   };
 }
 
-/** Writes through a temp file so an interrupted save cannot leave a half-written config. */
+/** Saves the two identifiers, validating both so a typo cannot be persisted. */
 export async function saveStoredConfig(
   values: Required<StoredConfig>,
   env: NodeJS.ProcessEnv = process.env,
@@ -187,12 +201,8 @@ export async function saveStoredConfig(
     tenantId: guid(values.tenantId, "tenant ID"),
     clientId: guid(values.clientId, "application (client) ID"),
   };
-  await makeOwnerOnlyDir(stateDir(env));
-
   const path = configPath(env);
-  const temp = `${path}.${process.pid}.tmp`;
-  await writeOwnerOnlyFile(temp, `${JSON.stringify(stored, null, 2)}\n`);
-  await replaceFile(temp, path);
+  await saveOwnerOnlyJson(path, stored);
   return path;
 }
 

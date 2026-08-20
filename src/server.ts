@@ -6,6 +6,7 @@ import { Authenticator, clearStoredToken } from "./auth.js";
 import {
   loadConfig,
   makeOwnerOnlyDir,
+  NotConfiguredError,
   readStoredConfig,
   saveStoredConfig,
   stateDir,
@@ -13,6 +14,7 @@ import {
   type Config,
 } from "./config.js";
 import { runHuntingQuery } from "./graph.js";
+import { clearLiveCache, liveColumns, mergeColumns, searchLiveCache, type LiveColumns } from "./live-schema.js";
 import { findTable, listTables, schema, searchTables, suggestTables } from "./schema.js";
 
 /** Keeps one tool result well inside the model's context budget. */
@@ -51,6 +53,24 @@ const failed = (error: unknown) => ({
 /** Graph annotates typed values with sibling `<field>@odata.type` keys that carry no signal. */
 function stripAnnotations(row: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(row).filter(([key]) => !key.endsWith("@odata.type")));
+}
+
+/** Either the tenant answered, or it did not and said why. */
+type Verification = { live: LiveColumns } | { unavailable: string };
+
+/** How the live lookup went, for the payload: when it happened, or why it did not. */
+function describeVerification(verified: Verification) {
+  return "live" in verified
+    ? {
+        verifiedAt: verified.live.fetchedAt,
+        fromCache: verified.live.cached,
+        tenantColumns: verified.live.columns.length,
+      }
+    : {
+        status: "unavailable",
+        reason: verified.unavailable,
+        note: "The columns above are from the bundled documentation snapshot, which can lag your tenant.",
+      };
 }
 
 /** Writes untruncated results to an owner-only file, only when explicitly requested. */
@@ -116,15 +136,16 @@ export function createServer(): McpServer {
     {
       title: "Sign out of Defender XDR",
       description:
-        "Delete the Defender XDR sign-in cached on this machine. This does not revoke the Entra session in the browser or sign the user out of other applications.",
+        "Delete the Defender XDR sign-in cached on this machine, along with any tenant schema cached from it. This does not revoke the Entra session in the browser or sign the user out of other applications.",
       inputSchema: {},
     },
     async () => {
-      const removed = await clearStoredToken();
+      const [removed, cacheRemoved] = await Promise.all([clearStoredToken(), clearLiveCache()]);
       return ok(
-        removed
+        (removed
           ? "Removed the cached Defender XDR sign-in from this machine. The browser session with Microsoft is untouched."
-          : "No Defender XDR sign-in was cached on this machine.",
+          : "No Defender XDR sign-in was cached on this machine.") +
+          (cacheRemoved ? " The cached tenant schema was deleted as well." : ""),
       );
     },
   );
@@ -179,46 +200,108 @@ export function createServer(): McpServer {
     },
   );
 
+  /**
+   * Asks the tenant which columns a table really has, or explains why it could not.
+   *
+   * A failure here is never fatal: an unconfigured plugin, a signed-out user, or a table this
+   * tenant does not carry all degrade to the bundled snapshot with the reason attached. That is
+   * more useful than an error, and it cannot interrupt the user with a browser sign-in.
+   */
+  async function verifyAgainstTenant(table: string, refresh: boolean): Promise<Verification> {
+    try {
+      return { live: await liveColumns(auth(), config(), table, { refresh }) };
+    } catch (error) {
+      // The full "not configured" message asks Claude to go collect two GUIDs, which is the
+      // wrong thing to chase in the middle of a schema lookup, so it is condensed here.
+      if (error instanceof NotConfiguredError) return { unavailable: "the plugin is not configured yet" };
+      return { unavailable: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** The signed-in tenant, when there is one — schema lookups work unconfigured too. */
+  function tenantId(): string | undefined {
+    try {
+      return config().tenantId;
+    } catch {
+      return undefined;
+    }
+  }
+
   server.registerTool(
     "xdr_get_schema",
     {
       title: "Look up Defender XDR tables and columns",
       description:
-        "List, search, or describe Defender XDR Advanced Hunting tables and their columns from the bundled official schema. Works without signing in. Use it before writing a query that relies on an uncertain table or column.",
+        "List, search, or describe Defender XDR Advanced Hunting tables and their columns. Describing an exact table also verifies its columns against the signed-in tenant with a zero-row query, cached for a week, so tenant-specific, preview, and newly added columns show up next to the bundled documentation; pass live=false to stay offline. Listing and searching read local files only. Use it before writing a query that leans on an uncertain table or column.",
       inputSchema: {
         table: z.string().optional().describe("Exact table name to describe, such as DeviceProcessEvents"),
         search: z.string().optional().describe("Substring to match against table and column names and descriptions"),
         include_retired: z.boolean().optional().describe("Include tables Microsoft has retired"),
+        live: z
+          .boolean()
+          .optional()
+          .describe(
+            "Verify an exact table's columns against the signed-in tenant. Defaults to true; pass false for the bundled documentation alone.",
+          ),
+        refresh: z
+          .boolean()
+          .optional()
+          .describe("Ignore the cached tenant columns for this table and ask the tenant again"),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ table, search, include_retired = false }) => {
+    async ({ table, search, include_retired = false, live = true, refresh = false }) => {
       try {
         if (table && search) throw new Error("Pass either table or search, not both");
+        if (refresh && !table) throw new Error("refresh applies only to an exact table");
 
         if (table) {
-          const found = findTable(table);
-          if (!found) {
+          const documented = findTable(table);
+          const verified = live ? await verifyAgainstTenant(table, refresh) : undefined;
+          const tenant = verified && "live" in verified ? verified.live : undefined;
+          if (!documented && !tenant) {
             throw new Error(
-              `Unknown Defender XDR table "${table}". Closest names: ${suggestTables(table).join(", ")}`,
+              `Unknown Defender XDR table "${table}". Closest documented names: ${suggestTables(table).join(", ")}` +
+                (verified && "unavailable" in verified
+                  ? `. The tenant could not be asked: ${verified.unavailable}`
+                  : ""),
             );
           }
+
+          // A table the tenant returns but the documentation does not describe is still real —
+          // a custom table, or one newer than the snapshot — so it is reported, not refused.
+          const merged = tenant ? mergeColumns(documented?.columns ?? [], tenant.columns) : undefined;
           return ok(
             serialize({
-              name: found.name,
-              description: found.description,
-              status: found.status,
-              ...(found.replacedBy
-                ? { replacedBy: found.replacedBy, retirementDate: found.retirementDate }
+              name: documented?.name ?? table,
+              description:
+                documented?.description ?? "Present in your tenant; absent from the bundled documentation snapshot.",
+              status: documented?.status ?? "tenant-only",
+              ...(documented?.replacedBy
+                ? { replacedBy: documented.replacedBy, retirementDate: documented.retirementDate }
                 : {}),
-              documentationUrl: found.documentationUrl,
-              columns: found.columns,
+              ...(documented ? { documentationUrl: documented.documentationUrl } : {}),
+              columns: merged?.columns ?? documented?.columns ?? [],
+              // Documented columns the tenant did not return: retired, unlicensed, or not yet
+              // rolled out here. Naming them stops a query being built on one of them.
+              ...(merged?.documentedOnly.length ? { documentedNotInTenant: merged.documentedOnly } : {}),
+              ...(verified ? { liveVerification: describeVerification(verified) } : {}),
             }),
           );
         }
 
         if (search) {
-          return ok(serialize({ search, matches: searchTables(search, include_retired) }));
+          const tenant = tenantId();
+          const cachedTenantMatches = tenant ? await searchLiveCache(search, tenant) : [];
+          return ok(
+            serialize({
+              search,
+              matches: searchTables(search, include_retired),
+              // Columns cached by an earlier live lookup, matched from disk: no query is sent,
+              // and these can include columns the documentation snapshot has never heard of.
+              ...(cachedTenantMatches.length ? { cachedTenantMatches } : {}),
+            }),
+          );
         }
 
         return ok(

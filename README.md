@@ -16,9 +16,16 @@ The plugin adds four tools to Claude Code:
 | Tool | Purpose |
 | --- | --- |
 | `xdr_run_query` | Runs a read-only KQL query against Advanced Hunting. |
-| `xdr_get_schema` | Looks up hunting tables and columns. Works without signing in. |
+| `xdr_get_schema` | Looks up hunting tables and columns, checked against your own tenant. |
 | `xdr_login` | Opens your browser to sign in. Optional — querying signs you in on its own. |
 | `xdr_logout` | Removes the sign-in cached on this machine. |
+
+Table lookups answer from a snapshot of Microsoft's published schema that ships with the
+plugin, and — when you are signed in — from your tenant itself. Describing a table runs one
+zero-row query against it and caches the column list for a week, so preview columns, custom
+tables, and anything newer than the documentation show up as they really are, with the columns
+the docs claim but your tenant does not return listed separately. Pass `live: false` to stay
+offline, or `refresh: true` to re-ask sooner.
 
 It also installs four investigation skills — cross-domain, endpoint, identity, and messaging —
 that teach Claude how to scope an investigation, pick the cheapest table, and pivot on
@@ -109,10 +116,11 @@ Linux, `%APPDATA%` on Windows — holds:
 
 - `config.json` — the tenant and application IDs saved by sign-in
 - `token.json` — the refresh token and the signed-in username
+- `schema-cache.json` — the columns your tenant reports for the tables you have looked up
 - `exports/` — full result sets, written only when you explicitly ask Claude to export
 
-Both files are readable only by your own account. Delete the folder, or run
-`/defender-xdr:xdr-logout`, to remove the cached sign-in.
+Every file is readable only by your own account. Delete the folder, or run
+`/defender-xdr:xdr-logout`, to remove the cached sign-in and the cached tenant schema.
 
 ## Troubleshooting
 
@@ -132,13 +140,21 @@ registered under **Mobile and desktop applications**.
 
 ```bash
 npm install
-npm run verify   # typecheck, tests, build, and confirm dist/ is current
+npm run verify        # typecheck, tests, build, and confirm dist/ is current
+npm run schema        # rebuild the bundled schema snapshot from Microsoft's docs
+npm run schema:check  # report drift against the docs without writing
 ```
 
 `src/` is bundled by esbuild into a single `dist/server.js`, which is committed. Claude Code
 installs plugins by cloning, with no install or build step, so the server must run straight
 from the repository with no `node_modules` present. Rebuild and commit `dist/` with any
 change to `src/`.
+
+The bundled schema snapshot is generated, not hand-edited. `npm run schema` reads Microsoft's
+own documentation source, pins the commit it read, and rewrites
+`schema-snapshot/defender-xdr-schema.json` — so the diff on that file is exactly what Microsoft
+changed. Table retirements are announced in prose rather than in the schema tables, so the
+script carries a short curated list of them and warns when an entry no longer matches the docs.
 
 ## License
 

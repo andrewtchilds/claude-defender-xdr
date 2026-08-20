@@ -21,7 +21,7 @@ Use an **evidence funnel**: frame the decision, measure cheaply, retrieve the sm
 
 1. **Frame the decision.** Record the question or hypothesis, desired decision, entities, UTC interval, and known identifier types. Resolve local times to an explicit timezone. When a missing detail blocks a safe query, ask for it; otherwise state a narrow assumption. Continue when every frame field is recorded or explicitly unknown.
 
-2. **Map coverage.** Select the smallest relevant tables and note what each can and cannot establish. Use `xdr_get_schema` before inventing a table or column, when a bundled pattern does not cover the query, or when tenant drift is plausible. Describe preview or important tables with `live=true` when tenant availability matters. Continue when every planned claim has a candidate source or a named coverage gap.
+2. **Map coverage.** Select the smallest relevant tables and note what each can and cannot establish. Use `xdr_get_schema` before inventing a table or column, when a bundled pattern does not cover the query, or when tenant drift is plausible. Describing an exact table checks its columns against the tenant by default, so trust the returned columns — including any marked as absent from the documentation snapshot — over the bundled patterns; treat anything listed under `documentedNotInTenant` as unavailable here, and pass `refresh: true` when a lookup's `liveVerification` looks too old to trust. Continue when every planned claim has a candidate source or a named coverage gap.
 
 3. **Triage cheaply.** Query counts, distinct stable entities, first/last seen, and time buckets before raw events. Pass a matching narrow `timespan` to `xdr_run_query`. Continue when the volume and strongest next pivot are known.
 
