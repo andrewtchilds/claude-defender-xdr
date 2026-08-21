@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Authenticator, browserOpeners, NotSignedInError } from "../src/auth.js";
 import type { SignInHandoff, SignInPrompt } from "../src/auth.js";
 import type { Config } from "../src/config.js";
@@ -60,6 +63,83 @@ describe("accessTokenReady", () => {
     silent.mockRejectedValue(new Error("Microsoft Graph is unreachable"));
     await expect(auth.accessTokenReady()).rejects.toThrow(/unreachable/);
     expect(signIn).not.toHaveBeenCalled();
+  });
+});
+
+describe("refreshing the cached sign-in", () => {
+  const saved = { ...process.env };
+  let directory: string;
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), "xdr-auth-"));
+    process.env.XDG_CONFIG_HOME = directory;
+  });
+
+  afterEach(() => {
+    process.env = { ...saved };
+    vi.unstubAllGlobals();
+  });
+
+  const tokenPath = () => join(directory, "claude-defender-xdr", "token.json");
+
+  /** Writes the refresh token a signed-in user would already have. */
+  async function cachedSignIn(): Promise<void> {
+    await mkdir(join(directory, "claude-defender-xdr"), { recursive: true });
+    await writeFile(
+      tokenPath(),
+      JSON.stringify({
+        refreshToken: "refresh",
+        username: "analyst@example.com",
+        tenantId: config.tenantId,
+        clientId: config.clientId,
+      }),
+    );
+  }
+
+  // The regression this guards: a laptop that was briefly offline used to lose its saved
+  // sign-in, because every refresh failure was treated as a dead grant and deleted the token.
+  it("keeps the saved sign-in when Entra is unreachable", async () => {
+    await cachedSignIn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      }),
+    );
+
+    await expect(new Authenticator(config).accessTokenSilent()).rejects.toThrow(/Could not reach Microsoft Entra/);
+    await expect(readFile(tokenPath(), "utf8")).resolves.toContain("refresh");
+  });
+
+  it("keeps the saved sign-in when the token endpoint answers 5xx", async () => {
+    await cachedSignIn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "temporarily_unavailable" }), { status: 503 })),
+    );
+
+    await expect(new Authenticator(config).accessTokenSilent()).rejects.toThrow(/temporarily_unavailable/);
+    await expect(readFile(tokenPath(), "utf8")).resolves.toContain("refresh");
+  });
+
+  it("drops the saved sign-in once Entra pronounces the grant dead", async () => {
+    await cachedSignIn();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              error: "invalid_grant",
+              error_description: "AADSTS50173: The provided grant has expired.\nTrace ID: 1",
+            }),
+            { status: 400 },
+          ),
+      ),
+    );
+
+    await expect(new Authenticator(config).accessTokenSilent()).rejects.toThrow(/no longer valid.*AADSTS50173/);
+    await expect(readFile(tokenPath(), "utf8")).rejects.toThrow();
   });
 });
 

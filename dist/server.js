@@ -29236,6 +29236,17 @@ var NotSignedInError = class extends Error {
     this.name = "NotSignedInError";
   }
 };
+var GRANT_REJECTED = /* @__PURE__ */ new Set(["invalid_grant", "interaction_required"]);
+var TokenRequestError = class extends Error {
+  constructor(message, oauthError) {
+    super(message);
+    this.oauthError = oauthError;
+    this.name = "TokenRequestError";
+  }
+  get grantRejected() {
+    return this.oauthError !== void 0 && GRANT_REJECTED.has(this.oauthError);
+  }
+};
 function tokenPath() {
   return join2(stateDir(), "token.json");
 }
@@ -29322,15 +29333,20 @@ function scopeString(config2) {
   return [`${config2.graphBaseUrl}/${GRAPH_SCOPE}`, ...RESERVED_SCOPES].join(" ");
 }
 async function postToken(config2, form) {
-  const response = await fetch(tokenEndpoint(config2), {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(form).toString()
-  });
+  let response;
+  try {
+    response = await fetch(tokenEndpoint(config2), {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(form).toString()
+    });
+  } catch (error46) {
+    throw new Error(`Could not reach Microsoft Entra: ${error46.message}`);
+  }
   const body = await response.json().catch(() => ({}));
   if (!response.ok || !body.access_token) {
     const detail = (body.error_description ?? body.error ?? `HTTP ${response.status}`).split(/\r?\n/)[0];
-    throw new Error(detail);
+    throw new TokenRequestError(detail, typeof body.error === "string" ? body.error : void 0);
   }
   return body;
 }
@@ -29501,8 +29517,11 @@ var Authenticator = class {
         scope: scopeString(this.config)
       });
     } catch (error46) {
-      await clearStoredToken();
-      throw new NotSignedInError(`Your saved sign-in is no longer valid (${error46.message}).`);
+      if (error46 instanceof TokenRequestError && error46.grantRejected) {
+        await clearStoredToken();
+        throw new NotSignedInError(`Your saved sign-in is no longer valid (${error46.message}).`);
+      }
+      throw error46;
     }
     await this.accept(tokens);
     return this.accessToken.value;

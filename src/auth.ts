@@ -26,6 +26,28 @@ export class NotSignedInError extends Error {
   }
 }
 
+/**
+ * OAuth error codes with which Entra declares the grant itself dead: revoked, expired,
+ * superseded, or requiring fresh interaction. Only these make the stored refresh token
+ * worthless. Anything else the endpoint may say is a failure to ask, not a dead grant.
+ */
+const GRANT_REJECTED = new Set(["invalid_grant", "interaction_required"]);
+
+/** A token request Entra answered with an error, as opposed to one that never got through. */
+class TokenRequestError extends Error {
+  constructor(
+    message: string,
+    private readonly oauthError: string | undefined,
+  ) {
+    super(message);
+    this.name = "TokenRequestError";
+  }
+
+  get grantRejected(): boolean {
+    return this.oauthError !== undefined && GRANT_REJECTED.has(this.oauthError);
+  }
+}
+
 interface StoredToken {
   refreshToken: string;
   username: string;
@@ -189,16 +211,22 @@ function scopeString(config: Config): string {
 }
 
 async function postToken(config: Config, form: Record<string, string>): Promise<TokenResponse> {
-  const response = await fetch(tokenEndpoint(config), {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams(form).toString(),
-  });
+  let response: Response;
+  try {
+    response = await fetch(tokenEndpoint(config), {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(form).toString(),
+    });
+  } catch (error) {
+    // The request never reached Entra, so this says nothing about the grant it carried.
+    throw new Error(`Could not reach Microsoft Entra: ${(error as Error).message}`);
+  }
   const body = (await response.json().catch(() => ({}))) as TokenResponse;
   if (!response.ok || !body.access_token) {
     // Entra's error_description is multi-line and carries the actionable AADSTS code.
-    const detail = (body.error_description ?? body.error ?? `HTTP ${response.status}`).split(/\r?\n/)[0];
-    throw new Error(detail);
+    const detail = (body.error_description ?? body.error ?? `HTTP ${response.status}`).split(/\r?\n/)[0]!;
+    throw new TokenRequestError(detail, typeof body.error === "string" ? body.error : undefined);
   }
   return body;
 }
@@ -405,10 +433,15 @@ export class Authenticator {
         scope: scopeString(this.config),
       });
     } catch (error) {
-      // A revoked, expired, or superseded refresh token is unrecoverable: drop it so the
-      // next call reports a clean "sign in again" instead of retrying a dead credential.
-      await clearStoredToken();
-      throw new NotSignedInError(`Your saved sign-in is no longer valid (${(error as Error).message}).`);
+      // A grant Entra itself pronounced dead is unrecoverable: drop it so the next call
+      // reports a clean "sign in again" instead of retrying a dead credential. An offline
+      // moment or a 5xx from the token endpoint says nothing about the grant, so the token
+      // stays for the retry that would have succeeded.
+      if (error instanceof TokenRequestError && error.grantRejected) {
+        await clearStoredToken();
+        throw new NotSignedInError(`Your saved sign-in is no longer valid (${error.message}).`);
+      }
+      throw error;
     }
     await this.accept(tokens);
     return this.accessToken!.value;
