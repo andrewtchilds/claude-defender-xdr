@@ -209,6 +209,85 @@ describe("xdr_get_schema against a tenant", () => {
   });
 });
 
+describe("a rejected hunting query", () => {
+  /**
+   * Answers schema probes with columns and everything else with a semantic rejection, which
+   * is the shape of the real failure this exists for: KQL written against a column the
+   * tenant does not have.
+   */
+  function stubRejectingTenant(columnsByTable: Record<string, { name: string; type: string }[]>) {
+    const fetchMock = vi.fn(async (url: string, init: RequestInit = {}) => {
+      if (url.includes("/oauth2/v2.0/token")) {
+        return new Response(JSON.stringify({ access_token: "access", expires_in: 3600 }), { status: 200 });
+      }
+      const query = JSON.parse(String(init.body)).Query as string;
+      if (query.endsWith("| take 0")) {
+        const columns = columnsByTable[query.split("\n")[0]!.trim()];
+        return columns
+          ? new Response(JSON.stringify({ schema: columns, results: [] }), { status: 200 })
+          : new Response(JSON.stringify({ error: { message: "Failed to resolve table" } }), { status: 400 });
+      }
+      return new Response(
+        JSON.stringify({ error: { message: "Failed to resolve column or scalar expression named 'IsInteractive'" } }),
+        { status: 400 },
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  }
+
+  // The regression this guards: a failed query used to send the model to xdr_get_schema for
+  // the columns, costing a round-trip that the error itself can carry.
+  it("answers with the tenant's columns for the tables the query referenced", async () => {
+    await signedIn();
+    stubRejectingTenant({ EntraIdSignInEvents: [{ name: "LogonType", type: "String" }] });
+    const call = await connect();
+
+    const text = await call("xdr_run_query", { query: "EntraIdSignInEvents | where IsInteractive == true" });
+
+    expect(text).toContain("Failed to resolve column");
+    expect(text).toContain("The tenant's columns for the tables this query referenced");
+    expect(text).toContain("LogonType (String)");
+    expect(text).not.toContain("check it with xdr_get_schema");
+  });
+
+  it("carries a retired table's replacement, with the replacement's own columns", async () => {
+    await signedIn();
+    stubRejectingTenant({
+      AADSignInEventsBeta: [{ name: "Timestamp", type: "DateTime" }],
+      EntraIdSignInEvents: [{ name: "LogonType", type: "String" }],
+    });
+    const call = await connect();
+
+    const text = await call("xdr_run_query", { query: "AADSignInEventsBeta | where IsInteractive == true" });
+
+    expect(text).toContain("AADSignInEventsBeta (retired, replaced by EntraIdSignInEvents)");
+    expect(text).toContain("EntraIdSignInEvents: LogonType (String)");
+  });
+
+  it("caches the columns it fetched, so the correction path never probes twice", async () => {
+    await signedIn();
+    const fetchMock = stubRejectingTenant({ EntraIdSignInEvents: [{ name: "LogonType", type: "String" }] });
+    const call = await connect();
+
+    await call("xdr_run_query", { query: "EntraIdSignInEvents | where IsInteractive == true" });
+    const described = await call("xdr_get_schema", { table: "EntraIdSignInEvents" });
+
+    expect(described).toContain('"fromCache": true');
+    expect(fetchMock.mock.calls.filter(([, init]) => String(init?.body).includes("take 0")).length).toBe(1);
+  });
+
+  it("still names the schema tool when no referenced table could be answered", async () => {
+    await signedIn();
+    stubRejectingTenant({});
+    const call = await connect();
+
+    const text = await call("xdr_run_query", { query: "NoSuchTableAnywhere | take 1" });
+
+    expect(text).toContain("check it with xdr_get_schema");
+  });
+});
+
 describe("clientSignInPrompt", () => {
   /** Stands in for the low-level Server, recording what the client was asked to show. */
   function fake(capabilities: unknown) {

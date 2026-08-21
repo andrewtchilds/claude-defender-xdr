@@ -45,7 +45,7 @@ the model. **Nothing in this path can change tenant state.**
 
 | Tool | What it does |
 | --- | --- |
-| `xdr_run_query` | Runs one read-only KQL query and returns the rows. Takes a timespan and a row limit. The configured ceiling cannot be raised per call. |
+| `xdr_run_query` | Runs one read-only KQL query and returns the rows. Takes a timespan and a row limit. The configured ceiling cannot be raised per call. A rejected query answers with the tenant's real columns for the tables it referenced. |
 | `xdr_get_schema` | Lists, searches, or describes hunting tables. Listing and searching read local files only. Describing an exact table also asks the tenant for its real columns and caches the answer. |
 | `xdr_login` | Opens your browser for the Microsoft sign-in, and saves the tenant and client IDs if they were missing. Normally needed once. |
 | `xdr_logout` | Deletes the sign-in cached on this machine, and the cached tenant schema with it. The browser session with Microsoft is left alone. |
@@ -95,6 +95,11 @@ slow a query down, and a table still inside its TTL costs nothing.
 
 The cache is **keyed to the tenant**, so switching tenants discards it rather than serving one
 tenant's columns for another.
+
+A **rejected query answers with schema**. When Advanced Hunting refuses the KQL, which is
+usually a column or table this tenant does not have, the error carries the tenant's own columns
+for the tables the query referenced, and a retired table brings its replacement's columns
+along. Correcting a wrong guess costs one step, not a separate schema lookup.
 
 ## The skills layer
 

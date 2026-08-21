@@ -7,6 +7,16 @@ describe("bundled schema", () => {
     expect(findTable("DeviceProcessEvents")?.columns.length).toBeGreaterThan(10);
   });
 
+  // The documentation's own prose for this column describes Windows logon kinds, but tenants
+  // store a JSON array string; models copying the documented wording wrote filters that
+  // matched nothing. The generator carries the correction as an erratum; this guards against
+  // a regeneration quietly dropping it.
+  it("carries the corrected LogonType representation, not the documented prose", () => {
+    const logonType = findTable("EntraIdSignInEvents")?.columns.find(column => column.name === "LogonType");
+    expect(logonType?.description).toContain('["interactiveUser"]');
+    expect(logonType?.description).not.toContain("(RDP)");
+  });
+
   it("looks tables up case-insensitively", () => {
     expect(findTable("deviceprocessevents")?.name).toBe("DeviceProcessEvents");
     expect(findTable("  DeviceInfo  ")?.name).toBe("DeviceInfo");

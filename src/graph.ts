@@ -16,6 +16,17 @@ export interface HuntingResult {
   results: Record<string, unknown>[];
 }
 
+/** Carries the HTTP status of a Graph refusal, so callers can react to what kind it was. */
+export class GraphRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "GraphRequestError";
+  }
+}
+
 /** Accepts the shorthand the skills use (`7d`, `24h`) as well as raw ISO-8601 durations. */
 export function normalizeTimespan(value: string): string {
   const trimmed = value.trim();
@@ -48,10 +59,10 @@ function retryAfterMs(header: string | null): number | undefined {
 function explain(status: number): string {
   switch (status) {
     case 400:
-      // A rejected query is most often a column or table this tenant does not have, which is
-      // exactly what a live schema lookup settles — so name the tool instead of leaving the
-      // model to guess at another spelling.
-      return "Defender XDR rejected the KQL query; if a table or column may not exist in this tenant, check it with xdr_get_schema before retrying";
+      // A rejected query is most often a column or table this tenant does not have. The
+      // server answers a rejection with the tenant's real columns for the tables the query
+      // read, so the message here stays short rather than sending the model to another tool.
+      return "Defender XDR rejected the KQL query";
     case 401:
       return "Microsoft rejected the access token; sign in again with the xdr_login tool";
     case 403:
@@ -138,13 +149,16 @@ export async function runHuntingQuery(
       parsed = text ? JSON.parse(text) : {};
     } catch {
       if (response.ok) throw new Error("Microsoft Graph returned malformed JSON");
-      throw new Error(explain(response.status));
+      throw new GraphRequestError(explain(response.status), response.status);
     }
 
     if (!response.ok) {
       const graphError = parsed.error as { message?: unknown } | undefined;
       const detail = sanitize(String(graphError?.message ?? parsed.message ?? ""));
-      throw new Error(detail ? `${explain(response.status)}: ${detail}` : explain(response.status));
+      throw new GraphRequestError(
+        detail ? `${explain(response.status)}: ${detail}` : explain(response.status),
+        response.status,
+      );
     }
     return assertShape(parsed);
   }

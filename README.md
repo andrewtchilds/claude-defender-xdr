@@ -29,7 +29,8 @@ Running a hunting query does the same for every table that query read, so the te
 columns are on disk before you think to ask. That is how preview columns, custom tables, and
 anything newer than the documentation show up. A column the documentation lists but your tenant
 does not return is reported separately rather than dropped. Pass `live: false` to stay offline,
-or `refresh: true` to ask again before the week is up.
+or `refresh: true` to ask again before the week is up. A query the tenant rejects reports those
+same tenant columns in the error, so a wrong guess corrects in one step.
 
 The plugin also installs four investigation skills, one for cross-domain work and one each for
 endpoint, identity, and messaging. They teach Claude to scope an investigation, pick the
@@ -157,9 +158,11 @@ repository with no `node_modules` present. Rebuild and commit `dist/` with any c
 
 The bundled schema snapshot is generated, never hand-edited. `npm run schema` reads Microsoft's
 own documentation source, pins the commit it read, and rewrites
-`schema-snapshot/defender-xdr-schema.json`, so the diff on that file is exactly what Microsoft
-changed. Microsoft announces table retirements in prose rather than in the schema tables, so the
-script carries a short curated list of them and warns when an entry stops matching the docs.
+`schema-snapshot/defender-xdr-schema.json`, so the diff on that file is what Microsoft changed.
+Two curated lists in the script are the exception, and both warn when an entry stops matching
+the docs: table retirements, which Microsoft announces in prose rather than in the schema
+tables, and errata for column descriptions the docs get wrong, verified against live tenant
+data.
 
 ## Releasing
 

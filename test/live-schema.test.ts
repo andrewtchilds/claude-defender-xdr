@@ -52,6 +52,20 @@ async function seedCache(env: NodeJS.ProcessEnv, cache: unknown): Promise<string
 }
 
 describe("live tenant schema", () => {
+  // On Windows a virus scanner can hold the cache file locked past every rename retry. The
+  // write is a convenience for next time; the columns the tenant just returned are the answer.
+  it("returns the fetched columns even when the cache cannot be written", async () => {
+    const env = await isolatedEnv();
+    stubGraph([{ name: "DeviceId", type: "String" }]);
+    // A file where the state directory belongs makes every write under it fail.
+    await writeFile(join(env.XDG_CONFIG_HOME!, "claude-defender-xdr"), "in the way");
+
+    const result = await liveColumns(signedIn, config(), "DeviceInfo", { env });
+
+    expect(result.columns).toEqual([{ name: "DeviceId", type: "String" }]);
+    expect(result.cached).toBe(false);
+  });
+
   it("asks the tenant once, then serves the same columns from disk", async () => {
     const env = await isolatedEnv();
     const fetchMock = stubGraph([{ name: "DeviceId", type: "String" }]);

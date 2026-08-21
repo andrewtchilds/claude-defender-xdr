@@ -43,6 +43,35 @@ const RETIREMENTS = {
   AIAgentsInfo: { replacedBy: "AgentsInfo", retirementDate: "2026-07-01" },
 };
 
+/**
+ * Column descriptions the documentation gets wrong, corrected against live tenant data. A
+ * description that misstates how values are stored produces confidently wrong KQL, which is
+ * worse than no description at all. Each entry records the documented text it replaces; when
+ * Microsoft rewrites that text upstream, the correction is skipped with a warning instead of
+ * silently overriding prose that may have been fixed.
+ */
+const ERRATA = {
+  // Both sign-in tables document logon-session kinds ("interactive, remote interactive
+  // (RDP), network, batch, and service") that describe Windows logons, not what Entra
+  // stores. Verified 2026-08-20 against a live tenant: a JSON array string.
+  EntraIdSignInEvents: {
+    LogonType: {
+      replaces:
+        "Type of logon session, specifically interactive, remote interactive (RDP), network, batch, and service",
+      description:
+        'Type of sign-in session, stored as a JSON array string such as ["interactiveUser"] or ["nonInteractiveUser"]. Match the whole string with ==, or one value with has "interactiveUser"',
+    },
+  },
+  AADSignInEventsBeta: {
+    LogonType: {
+      replaces:
+        "Type of logon session, specifically interactive, remote interactive (RDP), network, batch, and service",
+      description:
+        'Type of sign-in session, stored as a JSON array string such as ["interactiveUser"] or ["nonInteractiveUser"]. Match the whole string with ==, or one value with has "interactiveUser"',
+    },
+  },
+};
+
 const snapshotPath = resolve(dirname(fileURLToPath(import.meta.url)), "../schema-snapshot/defender-xdr-schema.json");
 const checkOnly = process.argv.includes("--check");
 
@@ -245,6 +274,17 @@ for (const table of tables) {
   const retirement = RETIREMENTS[table.name];
   if (retirement) Object.assign(table, { status: "retired", ...retirement });
   else table.status = table.preview ? "preview" : "active";
+
+  for (const [columnName, erratum] of Object.entries(ERRATA[table.name] ?? {})) {
+    const column = table.columns.find(candidate => candidate.name === columnName);
+    if (!column) {
+      console.warn(`  note: erratum for ${table.name}.${columnName} matches no documented column`);
+    } else if (column.description !== erratum.replaces) {
+      console.warn(`  note: ${table.name}.${columnName} was rewritten upstream; re-verify its erratum`);
+    } else {
+      column.description = erratum.description;
+    }
+  }
 }
 
 const snapshot = {

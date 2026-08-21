@@ -16,7 +16,7 @@ import {
   writeOwnerOnlyFile,
   type Config,
 } from "./config.js";
-import { runHuntingQuery } from "./graph.js";
+import { GraphRequestError, runHuntingQuery } from "./graph.js";
 import {
   clearLiveCache,
   liveColumns,
@@ -30,6 +30,13 @@ import { findTable, listTables, schema, searchTables, suggestTables, tableNames 
 
 /** Keeps one tool result well inside the model's context budget. */
 const MAX_OUTPUT_BYTES = 50 * 1024;
+
+/**
+ * How long a rejected query will wait for schema help before going out without it. The probes
+ * are usually cache hits or one quick call, but a throttled tenant retries with waits, and the
+ * rejection itself is the answer the model needs first.
+ */
+const REJECTED_HELP_TIMEOUT_MS = 10_000;
 
 /**
  * Configuration and the authenticator are resolved on first use rather than at startup,
@@ -137,6 +144,39 @@ export function createServer(): McpServer {
   const config = resettable<Config>(() => loadConfig());
   const auth = resettable(() => new Authenticator(config(), clientSignInPrompt(server)));
 
+  /**
+   * Answers a rejected query with the columns the tenant really has, so correcting the KQL
+   * never needs a separate schema round-trip. Live columns only: a rejection is often exactly
+   * the place where the documentation was wrong, so documented columns are not offered here.
+   * A retired table's replacement rides along, because that is the table the corrected query
+   * should read. Anything that cannot be answered is skipped rather than reported.
+   */
+  async function rejectedQueryHelp(query: string): Promise<string> {
+    const tables = referencedTables(query, tableNames()).slice(0, 4);
+    for (const name of [...tables]) {
+      const replacement = findTable(name)?.replacedBy;
+      if (replacement && !tables.some(other => other.toLowerCase() === replacement.toLowerCase())) {
+        tables.push(replacement);
+      }
+    }
+
+    const lines: string[] = [];
+    for (const name of tables) {
+      const documented = findTable(name);
+      const note = documented?.replacedBy ? ` (retired, replaced by ${documented.replacedBy})` : "";
+      try {
+        const live = await liveColumns(auth(), config(), name);
+        const columns = live.columns.map(column => (column.type ? `${column.name} (${column.type})` : column.name));
+        lines.push(`${documented?.name ?? name}${note}: ${columns.join(", ")}`);
+      } catch {
+        // The table itself may be what the tenant rejected; its retirement is still worth saying.
+        if (note) lines.push(`${documented!.name}${note}`);
+      }
+    }
+    if (lines.length === 0) return "";
+    return `\n\nThe tenant's columns for the tables this query referenced:\n${lines.join("\n")}`;
+  }
+
   server.registerTool(
     "xdr_login",
     {
@@ -203,7 +243,7 @@ export function createServer(): McpServer {
     {
       title: "Run a Defender XDR hunting query",
       description:
-        "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. Signs the user in through their browser automatically on first use, so call this directly rather than signing in first. The tables a query reads are recorded against the tenant afterwards, so a later xdr_get_schema call describes the columns this tenant really has instead of the bundled documentation.",
+        "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. Signs the user in through their browser automatically on first use, so call this directly rather than signing in first. A rejected query reports the columns the tenant really has for the tables it referenced, so correct the KQL from that answer instead of guessing again.",
       inputSchema: {
         query: z.string().describe("The KQL Advanced Hunting query to run"),
         timespan: z
@@ -252,6 +292,23 @@ export function createServer(): McpServer {
         }
         return ok(text);
       } catch (error) {
+        // A rejection is usually a table or column this tenant does not have, so the error
+        // carries the tenant's own columns and the model can correct in one step. When no
+        // table could be identified or asked, fall back to naming the schema tool.
+        if (error instanceof GraphRequestError && error.status === 400) {
+          // Abandoned help keeps probing in the background and still lands in the cache,
+          // so the model's retry finds the columns even when this error went out bare.
+          const help = await Promise.race([
+            rejectedQueryHelp(query).catch(() => ""),
+            new Promise<string>(resolve => setTimeout(() => resolve(""), REJECTED_HELP_TIMEOUT_MS).unref()),
+          ]);
+          return failed(
+            new Error(
+              error.message +
+                (help || "; if a table or column may not exist in this tenant, check it with xdr_get_schema"),
+            ),
+          );
+        }
         return failed(error);
       }
     },

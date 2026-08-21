@@ -127,7 +127,9 @@ export async function liveColumns(
   cache.tables[key] = { name, fetchedAt, columns: result.schema };
   // Two lookups racing here can leave one table out of the file, since each writes the whole
   // cache it read. That costs a refetch later and nothing else, which is cheaper than locking.
-  await saveOwnerOnlyJson(liveCachePath(env), cache);
+  // A write that fails outright — on Windows, a scanner can hold the file locked past every
+  // retry — costs the same refetch, and must not cost the columns that were just fetched.
+  await saveOwnerOnlyJson(liveCachePath(env), cache).catch(() => undefined);
   return { columns: result.schema, fetchedAt, cached: false };
 }
 

@@ -29515,6 +29515,13 @@ var REQUEST_TIMEOUT_MS = 4 * 60 * 1e3;
 var MAX_ATTEMPTS = 3;
 var MAX_RETRY_DELAY_MS = 3e4;
 var RETRYABLE = /* @__PURE__ */ new Set([429, 500, 502, 503, 504]);
+var GraphRequestError = class extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+    this.name = "GraphRequestError";
+  }
+};
 function normalizeTimespan(value) {
   const trimmed = value.trim();
   const shorthand = /^(\d+)\s*([dh])$/i.exec(trimmed);
@@ -29539,7 +29546,7 @@ function retryAfterMs(header) {
 function explain(status) {
   switch (status) {
     case 400:
-      return "Defender XDR rejected the KQL query; if a table or column may not exist in this tenant, check it with xdr_get_schema before retrying";
+      return "Defender XDR rejected the KQL query";
     case 401:
       return "Microsoft rejected the access token; sign in again with the xdr_login tool";
     case 403:
@@ -29607,12 +29614,15 @@ async function runHuntingQuery(auth, config2, input) {
       parsed = text ? JSON.parse(text) : {};
     } catch {
       if (response.ok) throw new Error("Microsoft Graph returned malformed JSON");
-      throw new Error(explain(response.status));
+      throw new GraphRequestError(explain(response.status), response.status);
     }
     if (!response.ok) {
       const graphError = parsed.error;
       const detail = sanitize(String(graphError?.message ?? parsed.message ?? ""));
-      throw new Error(detail ? `${explain(response.status)}: ${detail}` : explain(response.status));
+      throw new GraphRequestError(
+        detail ? `${explain(response.status)}: ${detail}` : explain(response.status),
+        response.status
+      );
     }
     return assertShape(parsed);
   }
@@ -29680,7 +29690,7 @@ async function liveColumns(auth, config2, table, options = {}) {
   });
   const fetchedAt = (/* @__PURE__ */ new Date()).toISOString();
   cache.tables[key] = { name, fetchedAt, columns: result.schema };
-  await saveOwnerOnlyJson(liveCachePath(env), cache);
+  await saveOwnerOnlyJson(liveCachePath(env), cache).catch(() => void 0);
   return { columns: result.schema, fetchedAt, cached: false };
 }
 async function searchLiveCache(term, tenantId, env = process.env, limit = 20) {
@@ -29776,7 +29786,7 @@ var defender_xdr_schema_default = {
         {
           name: "LogonType",
           type: "string",
-          description: "Type of logon session, specifically interactive, remote interactive (RDP), network, batch, and service"
+          description: 'Type of sign-in session, stored as a JSON array string such as ["interactiveUser"] or ["nonInteractiveUser"]. Match the whole string with ==, or one value with has "interactiveUser"'
         },
         {
           name: "ErrorCode",
@@ -36320,7 +36330,7 @@ var defender_xdr_schema_default = {
         {
           name: "LogonType",
           type: "string",
-          description: "Type of logon session, specifically interactive, remote interactive (RDP), network, batch, and service"
+          description: 'Type of sign-in session, stored as a JSON array string such as ["interactiveUser"] or ["nonInteractiveUser"]. Match the whole string with ==, or one value with has "interactiveUser"'
         },
         {
           name: "ErrorCode",
@@ -38366,6 +38376,7 @@ function suggestTables(name, limit = 5) {
 
 // src/server.ts
 var MAX_OUTPUT_BYTES = 50 * 1024;
+var REJECTED_HELP_TIMEOUT_MS = 1e4;
 function resettable(create) {
   let cached2;
   const get = () => cached2 ??= create();
@@ -38432,6 +38443,32 @@ function createServer2() {
   const server = new McpServer({ name: plugin_default.name, version: plugin_default.version });
   const config2 = resettable(() => loadConfig());
   const auth = resettable(() => new Authenticator(config2(), clientSignInPrompt(server)));
+  async function rejectedQueryHelp(query) {
+    const tables = referencedTables(query, tableNames()).slice(0, 4);
+    for (const name of [...tables]) {
+      const replacement = findTable(name)?.replacedBy;
+      if (replacement && !tables.some((other) => other.toLowerCase() === replacement.toLowerCase())) {
+        tables.push(replacement);
+      }
+    }
+    const lines = [];
+    for (const name of tables) {
+      const documented = findTable(name);
+      const note = documented?.replacedBy ? ` (retired, replaced by ${documented.replacedBy})` : "";
+      try {
+        const live = await liveColumns(auth(), config2(), name);
+        const columns = live.columns.map((column) => column.type ? `${column.name} (${column.type})` : column.name);
+        lines.push(`${documented?.name ?? name}${note}: ${columns.join(", ")}`);
+      } catch {
+        if (note) lines.push(`${documented.name}${note}`);
+      }
+    }
+    if (lines.length === 0) return "";
+    return `
+
+The tenant's columns for the tables this query referenced:
+${lines.join("\n")}`;
+  }
   server.registerTool(
     "xdr_login",
     {
@@ -38480,7 +38517,7 @@ function createServer2() {
     "xdr_run_query",
     {
       title: "Run a Defender XDR hunting query",
-      description: "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. Signs the user in through their browser automatically on first use, so call this directly rather than signing in first. The tables a query reads are recorded against the tenant afterwards, so a later xdr_get_schema call describes the columns this tenant really has instead of the bundled documentation.",
+      description: "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. Signs the user in through their browser automatically on first use, so call this directly rather than signing in first. A rejected query reports the columns the tenant really has for the tables it referenced, so correct the KQL from that answer instead of guessing again.",
       inputSchema: {
         query: external_exports.string().describe("The KQL Advanced Hunting query to run"),
         timespan: external_exports.string().optional().describe("Lookback window such as 7d, 24h, P7D, or PT24H. Defaults to the configured window."),
@@ -38514,6 +38551,17 @@ function createServer2() {
         }
         return ok(text);
       } catch (error46) {
+        if (error46 instanceof GraphRequestError && error46.status === 400) {
+          const help = await Promise.race([
+            rejectedQueryHelp(query).catch(() => ""),
+            new Promise((resolve) => setTimeout(() => resolve(""), REJECTED_HELP_TIMEOUT_MS).unref())
+          ]);
+          return failed(
+            new Error(
+              error46.message + (help || "; if a table or column may not exist in this tenant, check it with xdr_get_schema")
+            )
+          );
+        }
         return failed(error46);
       }
     }
