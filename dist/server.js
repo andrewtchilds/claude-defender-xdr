@@ -29031,7 +29031,7 @@ var EMPTY_COMPLETION_RESULT = {
 var plugin_default = {
   name: "defender-xdr",
   displayName: "Microsoft Defender XDR",
-  version: "1.2.3",
+  version: "1.3.0",
   description: "Ask questions in plain English and get answers from Microsoft Defender XDR Advanced Hunting",
   author: {
     name: "Andrew Childs"
