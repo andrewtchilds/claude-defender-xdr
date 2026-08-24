@@ -115,12 +115,11 @@ export async function liveColumns(
     return { columns: cached.columns, fetchedAt: cached.fetchedAt, cached: true };
   }
 
-  // Silent auth only: looking up a schema must never pop open a browser sign-in the user did
-  // not ask for. Not being signed in surfaces as an error the caller degrades to the snapshot.
+  // runHuntingQuery uses silent auth only. A schema lookup must never open a browser or return
+  // an elicitation; not being signed in degrades to the bundled snapshot in the caller.
   const result = await runHuntingQuery(auth, config, {
     query: `${name}\n| take 0`,
     timespan: config.defaultTimespan,
-    silent: true,
   });
 
   const fetchedAt = new Date().toISOString();

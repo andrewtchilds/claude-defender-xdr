@@ -12,7 +12,7 @@ flowchart TB
   subgraph machine["Your machine"]
     you["You<br/>an analyst with a question"]
     code["Claude Code<br/>4 investigation skills scope the hunt<br/>and shape the KQL that gets written"]
-    mcp["defender-xdr MCP server<br/>node dist/server.js over stdio<br/>the only piece that talks to Microsoft"]
+    mcp["defender-xdr MCP server<br/>MCP 2026-07-28 over local stdio<br/>the only piece that talks to Microsoft"]
     state[("Config directory<br/>token.json, config.json, owner-only<br/>exports/ written only when you ask")]
     snapshot[("Schema snapshot<br/>64 hunting tables<br/>bundled, no network")]
     cache[("schema-cache.json<br/>columns this tenant really returns<br/>owner-only, 7-day TTL")]
@@ -47,7 +47,7 @@ the model. **Nothing in this path can change tenant state.**
 | --- | --- |
 | `xdr_run_query` | Runs one read-only KQL query and returns the rows. Takes a timespan and a row limit. The configured ceiling cannot be raised per call. A rejected query answers with the tenant's real columns for the tables it referenced. |
 | `xdr_get_schema` | Lists, searches, or describes hunting tables. Listing and searching read local files only. Describing an exact table also asks the tenant for its real columns and caches the answer. |
-| `xdr_login` | Opens your browser for the Microsoft sign-in, and saves the tenant and client IDs if they were missing. Normally needed once. |
+| `xdr_login` | Starts Microsoft sign-in. URL-capable clients show the sign-in link; other clients get the local system browser. It also saves tenant and client IDs when supplied. |
 | `xdr_logout` | Deletes the sign-in cached on this machine, and the cached tenant schema with it. The browser session with Microsoft is left alone. |
 
 ## Two views of the schema
@@ -120,24 +120,42 @@ run.
 ```mermaid
 sequenceDiagram
   autonumber
-  participant Code as Claude Code
+  participant Code as MCP client
   participant MCP as MCP server, local
-  participant Browser as System browser
+  participant Browser as Browser
   participant Entra as Microsoft Entra ID
 
-  Code->>MCP: a query with no cached sign-in, or xdr_login
-  MCP->>MCP: PKCE challenge, listener on 127.0.0.1, ephemeral port
-  MCP->>Browser: open the authorize URL
-  Browser->>Entra: your normal Microsoft sign-in, MFA included
-  Entra-->>MCP: auth code returned to http://localhost
-  MCP->>Entra: auth code + PKCE verifier
-  Entra-->>MCP: access token, in memory
-  Entra-->>MCP: refresh token, owner-only file
+  Code->>MCP: xdr_run_query without a cached sign-in, or xdr_login
+  MCP->>MCP: PKCE challenge and listener on 127.0.0.1, ephemeral port
+  alt client advertises elicitation.url
+    MCP-->>Code: input_required with authorize URL and signed requestState
+    Code->>Browser: show or open the authorize URL
+    Browser->>Entra: normal Microsoft sign-in, MFA included
+    Entra-->>MCP: auth code returned to http://localhost
+    MCP->>Entra: auth code and PKCE verifier
+    Entra-->>MCP: access token and refresh token
+    Code->>MCP: retry the original tools/call with accept and requestState
+    MCP-->>Code: login result, or the original query result
+  else client has no URL elicitation
+    MCP->>Browser: open the authorize URL in the local system browser
+    Browser->>Entra: normal Microsoft sign-in, MFA included
+    Entra-->>MCP: auth code returned to http://localhost
+    MCP->>Entra: auth code and PKCE verifier
+    Entra-->>MCP: access token and refresh token
+    MCP-->>Code: finish the waiting tool call
+  end
 ```
 
-An authorization-code flow with PKCE against a loopback listener on an ephemeral port. There is
-no client secret and no device code, which is why sign-in can happen inside a tool call with no
-terminal. After this, queries refresh silently until Microsoft expires or revokes the grant.
+The server uses MCP 2026-07-28 Multi Round-Trip Requests for clients that advertise URL
+elicitation. The signed `requestState` contains only routing data: an attempt ID, the operation,
+the tenant and application IDs, and an argument fingerprint. It never contains the PKCE verifier,
+auth code, or either token. Declining or cancelling the URL request closes the loopback listener.
+
+Clients without URL elicitation keep the existing local-browser behavior. The tool call waits
+while the server opens the system browser itself. Both paths use the same authorization-code flow
+with PKCE and the same loopback listener. There is no client secret or device code. After sign-in,
+queries refresh silently until Microsoft expires or revokes the grant. Schema lookups use silent
+authentication only and never start either browser path.
 
 ## Guardrails
 
