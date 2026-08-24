@@ -1,11 +1,26 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import {
+  CLIENT_CAPABILITIES_META_KEY,
+  createRequestStateCodec,
+  inputRequired,
+  inputResponse,
+  McpServer,
+  type ClientCapabilities,
+  type InputRequiredResult,
+  type ServerContext,
+} from "@modelcontextprotocol/server";
 import { z } from "zod";
 // The manifest version is imported, not restated, so the version Claude sees over MCP cannot
 // drift from the one the plugin was packaged and released under.
 import manifest from "../.claude-plugin/plugin.json" with { type: "json" };
-import { Authenticator, clearStoredToken, type SignInPrompt } from "./auth.js";
+import {
+  Authenticator,
+  clearStoredToken,
+  NotSignedInError,
+  SIGN_IN_TIMEOUT_MS,
+  type AuthenticatorOptions,
+} from "./auth.js";
 import {
   loadConfig,
   makeOwnerOnlyDir,
@@ -38,19 +53,83 @@ const MAX_OUTPUT_BYTES = 50 * 1024;
  */
 const REJECTED_HELP_TIMEOUT_MS = 10_000;
 
+const SIGN_IN_RESPONSE_KEY = "defender-sign-in";
+
+type SignInPurpose = "xdr-login" | "xdr-run-query";
+
+type SignInRequestState = {
+  version: 1;
+  purpose: SignInPurpose;
+  attemptId: string;
+  flowId: string;
+  tenantId: string;
+  clientId: string;
+  argumentFingerprint: string;
+};
+
+/** One process serves every stdio round, so an ephemeral process key is sufficient. */
+const signInStateCodec = createRequestStateCodec<SignInRequestState>({
+  key: randomBytes(32),
+  ttlSeconds: SIGN_IN_TIMEOUT_MS / 1000,
+});
+
+/** Replay protection for accepted, declined, and cancelled rounds. */
+const consumedSignInFlows = new Map<string, number>();
+
 /**
  * Configuration and the authenticator are resolved on first use rather than at startup,
  * so the server still connects (and `xdr_get_schema` still answers) when the plugin has
  * not been configured yet. Only a successful resolution is cached, and `reset` drops it,
  * so configuring through `xdr_login` applies to the very next call without a restart.
  */
-function resettable<T>(create: () => T) {
+type Resettable<T> = (() => T) & { reset(): void };
+
+function resettable<T>(create: () => T): Resettable<T> {
   let cached: T | undefined;
-  const get = () => (cached ??= create());
+  const get = (() => (cached ??= create())) as Resettable<T>;
   get.reset = () => {
     cached = undefined;
   };
   return get;
+}
+
+export interface ServerRuntime {
+  config: Resettable<Config>;
+  auth: Resettable<Authenticator>;
+}
+
+/** Shares process-local configuration and pending OAuth attempts across MCP request rounds. */
+export function createServerRuntime(authOptions: AuthenticatorOptions = {}): ServerRuntime {
+  const config = resettable<Config>(() => loadConfig());
+  const auth = resettable(() => new Authenticator(config(), authOptions));
+  return { config, auth };
+}
+
+function argumentFingerprint(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("base64url");
+}
+
+function isSignInRequestState(value: unknown): value is SignInRequestState {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const state = value as Record<string, unknown>;
+  return (
+    state.version === 1 &&
+    (state.purpose === "xdr-login" || state.purpose === "xdr-run-query") &&
+    typeof state.attemptId === "string" &&
+    typeof state.flowId === "string" &&
+    typeof state.tenantId === "string" &&
+    typeof state.clientId === "string" &&
+    typeof state.argumentFingerprint === "string"
+  );
+}
+
+function consumeSignInFlow(flowId: string): void {
+  const now = Date.now();
+  for (const [id, expiresAt] of consumedSignInFlows) {
+    if (expiresAt <= now) consumedSignInFlows.delete(id);
+  }
+  if (consumedSignInFlows.has(flowId)) throw new Error("This Defender XDR sign-in response was already consumed.");
+  consumedSignInFlows.set(flowId, now + SIGN_IN_TIMEOUT_MS);
 }
 
 function serialize(value: unknown): string {
@@ -101,48 +180,102 @@ async function exportResults(payload: unknown): Promise<string> {
   return path;
 }
 
-/**
- * Hands sign-in URLs to the client instead of launching a browser in this process.
- *
- * URL-mode elicitation is the right shape for this: the client opens the URL and confirms
- * when the flow is done, so the server spawns nothing. That matters more here than in most
- * plugins, because the Windows alternatives are `rundll32` and encoded `powershell`, both of
- * which a Defender tenant is liable to alert on.
- *
- * Support is checked against `elicitation.url` rather than `elicitation` as a whole, because
- * the two modes are advertised separately. Claude Code 2.1.238 declares `{ form: {} }` and
- * answers a URL elicitation with "Client does not support url elicitation.", so today this
- * returns undefined and sign-in opens a browser locally. Nothing here needs to change when a
- * client starts advertising `url`; the handoff then takes over on its own.
- */
-export function clientSignInPrompt(server: Pick<McpServer, "server">): SignInPrompt {
-  return {
-    handOff(url, elicitationId) {
-      if (!server.server.getClientCapabilities()?.elicitation?.url) return undefined;
-      return {
-        answered: server.server.elicitInput({
-          mode: "url",
-          message: "Sign in to Microsoft Defender XDR, then confirm here once you are done.",
-          url,
-          elicitationId,
-        }),
-      };
-    },
-    settle(elicitationId) {
-      // Best effort. The sign-in has already succeeded or failed on its own terms, so a
-      // client that cannot take the notification changes nothing about the result.
-      void server.server
-        .createElicitationCompletionNotifier(elicitationId)()
-        .catch(() => {});
-    },
-  };
+function supportsUrlElicitation(ctx: ServerContext): boolean {
+  const envelope = ctx.mcpReq.envelope as Record<string, unknown> | undefined;
+  const capabilities = envelope?.[CLIENT_CAPABILITIES_META_KEY] as ClientCapabilities | undefined;
+  return capabilities?.elicitation?.url !== undefined;
 }
 
-export function createServer(): McpServer {
-  const server = new McpServer({ name: manifest.name, version: manifest.version });
+export interface CreateServerOptions {
+  runtime?: ServerRuntime;
+  authenticator?: AuthenticatorOptions;
+}
 
-  const config = resettable<Config>(() => loadConfig());
-  const auth = resettable(() => new Authenticator(config(), clientSignInPrompt(server)));
+export function createServer(): McpServer;
+export function createServer(options: CreateServerOptions): McpServer;
+export function createServer(options: CreateServerOptions = {}): McpServer {
+  const runtime = options.runtime ?? createServerRuntime(options.authenticator);
+  const { config, auth } = runtime;
+  const server = new McpServer(
+    { name: manifest.name, version: manifest.version },
+    { requestState: { verify: signInStateCodec.verify } },
+  );
+
+  function signInRequest(
+    attempt: { authorizationUrl: string },
+    requestState: string,
+  ): InputRequiredResult {
+    return inputRequired({
+      inputRequests: {
+        [SIGN_IN_RESPONSE_KEY]: inputRequired.elicitUrl({
+          message: "Sign in to Microsoft Defender XDR, then confirm when you are done.",
+          url: attempt.authorizationUrl,
+        }),
+      },
+      requestState,
+    });
+  }
+
+  async function beginSignIn(
+    purpose: SignInPurpose,
+    fingerprint: string,
+    ctx: ServerContext,
+  ): Promise<{ username: string } | { result: InputRequiredResult }> {
+    const resolved = config();
+    const attempt = await auth().startSignIn();
+    const state: SignInRequestState = {
+      version: 1,
+      purpose,
+      attemptId: attempt.attemptId,
+      flowId: randomUUID(),
+      tenantId: resolved.tenantId,
+      clientId: resolved.clientId,
+      argumentFingerprint: fingerprint,
+    };
+
+    if (supportsUrlElicitation(ctx)) {
+      return { result: signInRequest(attempt, await signInStateCodec.mint(state, ctx)) };
+    }
+
+    auth().openSignInInBrowser(attempt.attemptId);
+    return { username: await auth().waitForSignIn(attempt.attemptId) };
+  }
+
+  async function resumeSignIn(
+    value: unknown,
+    purpose: SignInPurpose,
+    fingerprint: string,
+    ctx: ServerContext,
+  ): Promise<{ username: string } | { result: InputRequiredResult }> {
+    if (!isSignInRequestState(value)) throw new Error("The Defender XDR sign-in request state is malformed.");
+    if (value.purpose !== purpose || value.argumentFingerprint !== fingerprint) {
+      throw new Error("The Defender XDR sign-in request does not match this tool call.");
+    }
+
+    const resolved = config();
+    if (value.tenantId !== resolved.tenantId || value.clientId !== resolved.clientId) {
+      throw new Error("The Defender XDR sign-in request no longer matches the configured tenant or application.");
+    }
+
+    const attempt = auth().signInAttempt(value.attemptId);
+    if (!attempt) throw new Error("The Defender XDR sign-in attempt is unknown or expired.");
+
+    const response = inputResponse(ctx.mcpReq.inputResponses, SIGN_IN_RESPONSE_KEY);
+    if (response.kind === "missing") {
+      return { result: signInRequest(attempt, await signInStateCodec.mint(value, ctx)) };
+    }
+
+    consumeSignInFlow(value.flowId);
+    if (response.kind !== "elicit") {
+      throw new Error("The Defender XDR sign-in response was malformed.");
+    }
+    if (response.action === "decline" || response.action === "cancel") {
+      const reason = response.action === "decline" ? "Sign-in was declined." : "Sign-in was cancelled.";
+      auth().cancelSignIn(value.attemptId, reason);
+      throw new Error(reason);
+    }
+    return { username: await auth().waitForSignIn(value.attemptId) };
+  }
 
   /**
    * Answers a rejected query with the columns the tenant really has, so correcting the KQL
@@ -183,7 +316,7 @@ export function createServer(): McpServer {
       title: "Sign in to Defender XDR",
       description:
         "Sign in to Microsoft Defender XDR in the browser. Querying signs in on its own, so this is only needed to configure the plugin (pass tenant_id and client_id, which are saved and applied immediately), to switch tenant or account, or to sign in ahead of time. Returns once the user finishes signing in.",
-      inputSchema: {
+      inputSchema: z.object({
         tenant_id: z
           .string()
           .optional()
@@ -194,25 +327,39 @@ export function createServer(): McpServer {
           .describe(
             "GUID of the Entra app registration to sign in with. Only needed the first time. This is not a secret.",
           ),
-      },
+      }),
     },
-    async ({ tenant_id, client_id }) => {
+    async ({ tenant_id, client_id }, ctx) => {
       try {
-        if (tenant_id || client_id) {
-          // Either ID may be supplied alone to correct just that one, so the missing half
-          // comes from what was saved before. saveStoredConfig validates both.
-          const saved = readStoredConfig();
-          await saveStoredConfig({
-            tenantId: tenant_id ?? saved.tenantId ?? "",
-            clientId: client_id ?? saved.clientId ?? "",
-          });
-          // A new tenant or app makes the resolved config and any cached token stale.
-          config.reset();
-          auth.reset();
+        const fingerprint = argumentFingerprint({ tenant_id, client_id });
+        const state = ctx.mcpReq.requestState<unknown>();
+        let signIn: { username: string } | { result: InputRequiredResult };
+
+        if (state !== undefined) {
+          // Resume before configuration work. Re-saving and resetting here would discard the
+          // authenticator that owns the pending loopback listener.
+          signIn = await resumeSignIn(state, "xdr-login", fingerprint, ctx);
+        } else {
+          if (tenant_id || client_id) {
+            // Either ID may be supplied alone to correct just that one, so the missing half
+            // comes from what was saved before. saveStoredConfig validates both.
+            const saved = readStoredConfig();
+            await saveStoredConfig({
+              tenantId: tenant_id ?? saved.tenantId ?? "",
+              clientId: client_id ?? saved.clientId ?? "",
+            });
+            // A new tenant or app makes the resolved config and any cached token stale.
+            config.reset();
+            auth.reset();
+          }
+          // Explicit login always starts an account-selection flow, even with a usable token.
+          signIn = await beginSignIn("xdr-login", fingerprint, ctx);
         }
 
-        const username = await auth().signIn();
-        return ok(`Signed in to Defender XDR as ${username}. Queries will reuse this sign-in until it expires or is revoked.`);
+        if ("result" in signIn) return signIn.result;
+        return ok(
+          `Signed in to Defender XDR as ${signIn.username}. Queries will reuse this sign-in until it expires or is revoked.`,
+        );
       } catch (error) {
         return failed(error);
       }
@@ -225,7 +372,7 @@ export function createServer(): McpServer {
       title: "Sign out of Defender XDR",
       description:
         "Delete the Defender XDR sign-in cached on this machine, along with any tenant schema cached from it. This does not revoke the Entra session in the browser or sign the user out of other applications.",
-      inputSchema: {},
+      inputSchema: z.object({}),
     },
     async () => {
       const [removed, cacheRemoved] = await Promise.all([clearStoredToken(), clearLiveCache()]);
@@ -244,7 +391,7 @@ export function createServer(): McpServer {
       title: "Run a Defender XDR hunting query",
       description:
         "Run a read-only KQL query against Microsoft Defender XDR Advanced Hunting and return the rows. Advanced Hunting cannot modify tenant state. Signs the user in through their browser automatically on first use, so call this directly rather than signing in first. A rejected query reports the columns the tenant really has for the tables it referenced, so correct the KQL from that answer instead of guessing again.",
-      inputSchema: {
+      inputSchema: z.object({
         query: z.string().describe("The KQL Advanced Hunting query to run"),
         timespan: z
           .string()
@@ -255,11 +402,26 @@ export function createServer(): McpServer {
           .boolean()
           .optional()
           .describe("Write the complete, untruncated result set to an owner-only local file"),
-      },
+      }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async ({ query, timespan, max_rows, export_results }) => {
+    async ({ query, timespan, max_rows, export_results }, ctx) => {
       try {
+        const fingerprint = argumentFingerprint({ query, timespan, max_rows, export_results });
+        const state = ctx.mcpReq.requestState<unknown>();
+        if (state !== undefined) {
+          const signIn = await resumeSignIn(state, "xdr-run-query", fingerprint, ctx);
+          if ("result" in signIn) return signIn.result;
+        } else {
+          try {
+            await auth().accessTokenSilent();
+          } catch (error) {
+            if (!(error instanceof NotSignedInError)) throw error;
+            const signIn = await beginSignIn("xdr-run-query", fingerprint, ctx);
+            if ("result" in signIn) return signIn.result;
+          }
+        }
+
         const resolved = config();
         const result = await runHuntingQuery(auth(), resolved, {
           query,
@@ -347,7 +509,7 @@ export function createServer(): McpServer {
       title: "Look up Defender XDR tables and columns",
       description:
         "List, search, or describe Defender XDR Advanced Hunting tables and their columns. Describing an exact table also verifies its columns against the signed-in tenant with a zero-row query, cached for a week, so tenant-specific, preview, and newly added columns show up next to the bundled documentation; pass live=false to stay offline. Listing and searching read local files only. Use it before writing a query that leans on an uncertain table or column.",
-      inputSchema: {
+      inputSchema: z.object({
         table: z.string().optional().describe("Exact table name to describe, such as DeviceProcessEvents"),
         search: z.string().optional().describe("Substring to match against table and column names and descriptions"),
         include_retired: z.boolean().optional().describe("Include tables Microsoft has retired"),
@@ -361,7 +523,7 @@ export function createServer(): McpServer {
           .boolean()
           .optional()
           .describe("Ignore the cached tenant columns for this table and ask the tenant again"),
-      },
+      }),
       annotations: { readOnlyHint: true },
     },
     async ({ table, search, include_retired = false, live = true, refresh = false }) => {

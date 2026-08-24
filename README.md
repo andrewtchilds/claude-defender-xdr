@@ -17,7 +17,7 @@ The plugin adds four tools to Claude Code:
 | --- | --- |
 | `xdr_run_query` | Runs a read-only KQL query against Advanced Hunting. |
 | `xdr_get_schema` | Looks up hunting tables and columns, checked against your own tenant. |
-| `xdr_login` | Opens your browser to sign in. Optional, since querying signs you in on its own. |
+| `xdr_login` | Starts browser sign-in. Optional, since querying signs you in on its own. |
 | `xdr_logout` | Removes the sign-in cached on this machine. |
 
 Table lookups draw on two sources. One is a snapshot of Microsoft's published schema that ships
@@ -90,8 +90,9 @@ There is no separate sign-in step. Ask something:
 > which devices ran encoded powershell in the last 24 hours?
 ```
 
-The first query opens your browser, you complete the normal Microsoft sign-in including MFA, and
-the tab tells you when to come back. The query then runs and answers.
+On the first query, a client with URL elicitation support shows the Microsoft sign-in link. Other
+clients open the local system browser as before. Complete the normal sign-in, including MFA, and
+the query continues with the original KQL. You do not need to submit it again.
 
 The sign-in is cached, so you normally do this once. Microsoft decides when it expires, and the
 next query after that signs you in again. To sign in ahead of time, switch account, or change
@@ -151,6 +152,9 @@ npm run check:package # build it, then validate the staged plugin manifest
 npm run schema        # rebuild the bundled schema snapshot from Microsoft's docs
 npm run schema:check  # report drift against the docs without writing
 ```
+
+The server uses `@modelcontextprotocol/server` v2 and MCP 2026-07-28. Protocol integration tests
+use `@modelcontextprotocol/client` v2 as a development dependency, including a spawned stdio test.
 
 esbuild bundles `src/` into a single `dist/server.js`, which is committed. Claude Code installs
 plugins by cloning, with no install or build step, so the server has to run straight from the

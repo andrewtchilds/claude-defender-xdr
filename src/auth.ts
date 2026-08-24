@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { createServer } from "node:http";
 import { readFile, rm } from "node:fs/promises";
+import { createServer, type Server as HttpServer } from "node:http";
 import { AddressInfo } from "node:net";
 import { join } from "node:path";
 import {
@@ -14,14 +14,14 @@ import {
 } from "./config.js";
 
 /** How long the loopback listener waits for the user to finish signing in. */
-const SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
+export const SIGN_IN_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Refresh a little early so a token cannot expire mid-request. */
 const EXPIRY_SKEW_SECONDS = 120;
 
 export class NotSignedInError extends Error {
   constructor(detail = "No Defender XDR sign-in is cached on this machine.") {
-    super(`${detail} Use the xdr_login tool to sign in; it opens your browser.`);
+    super(`${detail} Use the xdr_login tool to sign in.`);
     this.name = "NotSignedInError";
   }
 }
@@ -91,7 +91,7 @@ async function readStoredToken(config: Config): Promise<StoredToken | undefined>
   try {
     const stored = JSON.parse(raw) as StoredToken;
     if (typeof stored?.refreshToken !== "string" || !stored.refreshToken) return undefined;
-    // A token minted for a different tenant or app is useless; treat it as absent so the
+    // A token minted for a different tenant or app is useless. Treat it as absent so the
     // user is asked to sign in again rather than shown a confusing Entra rejection.
     if (stored.tenantId !== config.tenantId || stored.clientId !== config.clientId) return undefined;
     return stored;
@@ -114,26 +114,6 @@ export async function clearStoredToken(): Promise<boolean> {
   }
 }
 
-/**
- * How a sign-in URL reaches the person signing in.
- *
- * A client that supports URL elicitation opens the URL itself, which is the whole point: this
- * process then launches nothing, so there is no platform launcher to get wrong and no
- * `rundll32` or `powershell` child process for an EDR to flag. The launcher below is only
- * for clients that cannot show a URL.
- */
-export interface SignInHandoff {
-  /** Resolves when the person answers the client's dialog. Rejects if it cannot show one. */
-  readonly answered: Promise<{ action: string }>;
-}
-
-export interface SignInPrompt {
-  /** Returns undefined when the client has no way to put a URL in front of the user. */
-  handOff(url: string, elicitationId: string): SignInHandoff | undefined;
-  /** Tells the client the sign-in is over, so it can take its dialog down. */
-  settle(elicitationId: string): void;
-}
-
 export interface BrowserOpener {
   command: string;
   args: string[];
@@ -142,24 +122,18 @@ export interface BrowserOpener {
 }
 
 /**
- * How each platform hands a URL to the default browser, most preferred first. This runs only
- * when the client cannot show a URL itself; see SignInPrompt.
+ * How each platform hands a URL to the default browser, most preferred first.
  *
  * Windows has no plain "open this URL" binary, so the goal is the shortest path to
- * ShellExecute, which is what resolves the `http` association to whatever browser the user
- * set as default. `url.dll,FileProtocolHandler` is that call with no shell in front of it,
- * and rundll32 reads everything after the comma and space as one argument, so a query string
- * full of `&` needs no escaping.
+ * ShellExecute, which is what resolves the `http` association to the browser the user set as
+ * default. `url.dll,FileProtocolHandler` makes that call with no shell in front of it.
  *
  * `cmd /c start` reaches the same API through a shell, which is why it is only the fallback.
- * There `&` has to become `^&` or cmd reads the query string as more commands, and the URL
- * stays unquoted because `^` is literal inside double quotes and the carets would reach the
- * browser. The bare `""` is the window title `start` expects first, and without it start
- * reads the URL as a title and opens nothing.
+ * There `&` has to become `^&` or cmd reads the query string as more commands. The bare `""`
+ * is the window title `start` expects first.
  *
  * `explorer.exe` is deliberately absent. It reads its argument as a filesystem path before
- * trying it as a URL, and an authorize URL runs past 400 characters, well beyond the
- * 260-character path limit. Explorer gives up and opens a file browser window instead.
+ * trying it as a URL, and an authorize URL runs past the Windows path limit.
  */
 export function browserOpeners(platform: NodeJS.Platform, url: string): BrowserOpener[] {
   switch (platform) {
@@ -180,7 +154,7 @@ export function browserOpeners(platform: NodeJS.Platform, url: string): BrowserO
 }
 
 /** Opens the system browser without inheriting stdio, which belongs to the MCP transport. */
-function openBrowser(url: string): void {
+function openSystemBrowser(url: string): void {
   const openers = browserOpeners(process.platform, url);
   const attempt = (index: number): void => {
     const opener = openers[index];
@@ -237,44 +211,140 @@ function htmlPage(title: string, message: string): string {
 <div style="text-align:center"><h1 style="font-size:1.25rem">${title}</h1><p>${message}</p></div>`;
 }
 
-/**
- * Runs the authorization-code flow with PKCE against a loopback listener.
- *
- * Entra treats `http://localhost` as a special public-client redirect where any port
- * matches, so this binds an ephemeral port rather than requiring a fixed one to be
- * registered. Nothing here needs a terminal, which is why it can run inside an MCP tool.
- */
-async function authorizeInteractively(config: Config, prompt?: SignInPrompt): Promise<TokenResponse> {
-  const verifier = randomBytes(32).toString("base64url");
-  const challenge = createHash("sha256").update(verifier).digest("base64url");
-  const state = randomBytes(16).toString("base64url");
+/** Public information about a pending sign-in. PKCE and OAuth secrets stay private. */
+export interface SignInAttempt {
+  attemptId: string;
+  authorizationUrl: string;
+  expiresAt: number;
+}
 
-  return await new Promise<TokenResponse>((resolve, reject) => {
-    const elicitationId = randomUUID();
-    let handedOff = false;
-    let settled = false;
-    const finish = (error: Error | undefined, value?: TokenResponse) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      server.close();
-      // The client cannot see the loopback callback, so its dialog stays up until told.
-      if (handedOff) prompt?.settle(elicitationId);
-      error ? reject(error) : resolve(value!);
-    };
+export interface AuthenticatorOptions {
+  /** Injected in tests and used by clients without URL elicitation support. */
+  browserOpener?: (url: string) => void;
+  /** Test seam. Production always uses the five-minute default. */
+  signInTimeoutMs?: number;
+}
 
-    const timer = setTimeout(
-      () => finish(new Error("Timed out waiting for the browser sign-in to complete.")),
-      SIGN_IN_TIMEOUT_MS,
-    );
+interface PendingSignIn extends SignInAttempt {
+  server: HttpServer;
+  completion: Promise<string>;
+  resolve: (username: string) => void;
+  reject: (error: Error) => void;
+  settled: boolean;
+  browserOpened: boolean;
+  callbackStarted: boolean;
+  expiryTimer?: NodeJS.Timeout;
+}
+
+function publicAttempt(attempt: PendingSignIn): SignInAttempt {
+  return {
+    attemptId: attempt.attemptId,
+    authorizationUrl: attempt.authorizationUrl,
+    expiresAt: attempt.expiresAt,
+  };
+}
+
+/** Holds access tokens and process-local interactive sign-in attempts. */
+export class Authenticator {
+  private accessToken?: { value: string; expiresAt: number };
+  private inFlight?: Promise<string>;
+  private readonly attempts = new Map<string, PendingSignIn>();
+  private activeAttemptId?: string;
+  private starting?: Promise<SignInAttempt>;
+  private readonly browserOpener: (url: string) => void;
+  private readonly signInTimeoutMs: number;
+
+  constructor(
+    private readonly config: Config,
+    options: AuthenticatorOptions = {},
+  ) {
+    this.browserOpener = options.browserOpener ?? openSystemBrowser;
+    this.signInTimeoutMs = options.signInTimeoutMs ?? SIGN_IN_TIMEOUT_MS;
+  }
+
+  /**
+   * Binds the loopback listener and returns its real authorization URL without opening it.
+   * Concurrent callers share the same live attempt.
+   */
+  async startSignIn(): Promise<SignInAttempt> {
+    const active = this.activeAttemptId ? this.attempts.get(this.activeAttemptId) : undefined;
+    if (active && !active.settled) return publicAttempt(active);
+    if (this.starting) return await this.starting;
+
+    const starting = this.createSignInAttempt();
+    this.starting = starting;
+    try {
+      return await starting;
+    } finally {
+      if (this.starting === starting) this.starting = undefined;
+    }
+  }
+
+  /** Returns an attempt while its signed request state can still be resumed. */
+  signInAttempt(attemptId: string): SignInAttempt | undefined {
+    const attempt = this.attempts.get(attemptId);
+    return attempt ? publicAttempt(attempt) : undefined;
+  }
+
+  /** Opens the exact URL assigned to an attempt, at most once. */
+  openSignInInBrowser(attemptId: string): void {
+    const attempt = this.attempts.get(attemptId);
+    if (!attempt) throw new Error("The Defender XDR sign-in attempt is unknown or expired.");
+    if (attempt.settled) throw new Error("The Defender XDR sign-in attempt has already finished.");
+    if (attempt.browserOpened) return;
+    attempt.browserOpened = true;
+    this.browserOpener(attempt.authorizationUrl);
+  }
+
+  /** Waits for the loopback callback and token exchange for one exact attempt. */
+  async waitForSignIn(attemptId: string): Promise<string> {
+    const attempt = this.attempts.get(attemptId);
+    if (!attempt) throw new Error("The Defender XDR sign-in attempt is unknown or expired.");
+    return await attempt.completion;
+  }
+
+  /** Stops a pending attempt, rejects its waiters, and removes it from the resumable set. */
+  cancelSignIn(attemptId: string, reason = "Sign-in was cancelled."): void {
+    const attempt = this.attempts.get(attemptId);
+    if (!attempt) throw new Error("The Defender XDR sign-in attempt is unknown or expired.");
+    if (!attempt.settled) this.finishAttempt(attempt, new Error(reason));
+    if (attempt.expiryTimer) clearTimeout(attempt.expiryTimer);
+    this.attempts.delete(attemptId);
+  }
+
+  async signedInAs(): Promise<string | undefined> {
+    return (await readStoredToken(this.config))?.username;
+  }
+
+  /** Never opens a browser. Schema probes and tool handlers use this boundary. */
+  async accessTokenSilent(): Promise<string> {
+    if (this.accessToken && this.accessToken.expiresAt > Date.now()) return this.accessToken.value;
+    // Collapse concurrent refreshes so parallel tool calls do not race on the same token.
+    this.inFlight ??= this.refresh().finally(() => {
+      this.inFlight = undefined;
+    });
+    return await this.inFlight;
+  }
+
+  private async createSignInAttempt(): Promise<SignInAttempt> {
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const state = randomBytes(16).toString("base64url");
+    let attempt: PendingSignIn | undefined;
 
     const server = createServer((request, response) => {
       const url = new URL(request.url ?? "/", "http://localhost");
-      // The browser also asks for /favicon.ico; only the callback carries a code or error.
+      // The browser also asks for /favicon.ico. Only the callback carries a code or error.
       if (!url.searchParams.has("code") && !url.searchParams.has("error")) {
         response.writeHead(404).end();
         return;
       }
+      if (!attempt || attempt.settled || attempt.callbackStarted) {
+        response.writeHead(409, { "content-type": "text/html" });
+        response.end(htmlPage("Sign-in already handled", "Return to your MCP client."));
+        return;
+      }
+      attempt.callbackStarted = true;
 
       const returnedState = url.searchParams.get("state") ?? "";
       const expected = Buffer.from(state);
@@ -282,7 +352,7 @@ async function authorizeInteractively(config: Config, prompt?: SignInPrompt): Pr
       if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
         response.writeHead(400, { "content-type": "text/html" });
         response.end(htmlPage("Sign-in failed", "The response did not match this request."));
-        finish(new Error("Sign-in response failed state validation; no token was accepted."));
+        this.finishAttempt(attempt, new Error("Sign-in response failed state validation; no token was accepted."));
         return;
       }
 
@@ -290,86 +360,101 @@ async function authorizeInteractively(config: Config, prompt?: SignInPrompt): Pr
       if (failure) {
         const description = url.searchParams.get("error_description") ?? failure;
         response.writeHead(400, { "content-type": "text/html" });
-        response.end(htmlPage("Sign-in failed", "Return to Claude Code for details."));
-        finish(new Error(description.split(/\r?\n/)[0]!));
+        response.end(htmlPage("Sign-in failed", "Return to your MCP client for details."));
+        this.finishAttempt(attempt, new Error(description.split(/\r?\n/)[0]!));
         return;
       }
 
       response.writeHead(200, { "content-type": "text/html" });
-      response.end(htmlPage("Signed in", "You can close this tab and return to Claude Code."));
+      response.end(htmlPage("Signed in", "You can close this tab and return to your MCP client."));
 
       const port = (server.address() as AddressInfo).port;
-      postToken(config, {
-        client_id: config.clientId,
+      void postToken(this.config, {
+        client_id: this.config.clientId,
         grant_type: "authorization_code",
         code: url.searchParams.get("code")!,
         redirect_uri: `http://localhost:${port}`,
         code_verifier: verifier,
-        scope: scopeString(config),
-      }).then(
-        tokens => finish(undefined, tokens),
-        error => finish(error as Error),
-      );
+        scope: scopeString(this.config),
+      })
+        .then(tokens => this.accept(tokens))
+        .then(
+          username => this.finishAttempt(attempt!, undefined, username),
+          error => this.finishAttempt(attempt!, error as Error),
+        );
     });
 
-    server.on("error", error => finish(error as Error));
+    // Port 0 lets the OS pick a free port. Binding to loopback keeps it off the network.
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error) => reject(error);
+      server.once("error", onError);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", onError);
+        resolve();
+      });
+    }).catch(error => {
+      server.close();
+      throw error;
+    });
 
-    // Port 0 lets the OS pick a free port; binding to loopback keeps it off the network.
-    server.listen(0, "127.0.0.1", () => {
-      const port = (server.address() as AddressInfo).port;
-      const authorizeUrl = new URL(`${config.loginBaseUrl}/${config.tenantId}/oauth2/v2.0/authorize`);
-      authorizeUrl.search = new URLSearchParams({
-        client_id: config.clientId,
-        response_type: "code",
-        redirect_uri: `http://localhost:${port}`,
-        response_mode: "query",
-        scope: scopeString(config),
-        state,
-        code_challenge: challenge,
-        code_challenge_method: "S256",
-        prompt: "select_account",
-      }).toString();
-      const url = authorizeUrl.toString();
-      const handoff = prompt?.handOff(url, elicitationId);
-      if (!handoff) {
-        openBrowser(url);
-        return;
+    const port = (server.address() as AddressInfo).port;
+    const authorizeUrl = new URL(`${this.config.loginBaseUrl}/${this.config.tenantId}/oauth2/v2.0/authorize`);
+    authorizeUrl.search = new URLSearchParams({
+      client_id: this.config.clientId,
+      response_type: "code",
+      redirect_uri: `http://localhost:${port}`,
+      response_mode: "query",
+      scope: scopeString(this.config),
+      state,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      prompt: "select_account",
+    }).toString();
+
+    let resolve!: (username: string) => void;
+    let reject!: (error: Error) => void;
+    const completion = new Promise<string>((done, fail) => {
+      resolve = done;
+      reject = fail;
+    });
+    // A callback can fail before an MCP retry starts waiting. Keep that rejection handled while
+    // preserving it for waitForSignIn(), which still receives the original error.
+    void completion.catch(() => {});
+
+    const attemptId = randomUUID();
+    const expiresAt = Date.now() + this.signInTimeoutMs;
+    attempt = {
+      attemptId,
+      authorizationUrl: authorizeUrl.toString(),
+      expiresAt,
+      server,
+      completion,
+      resolve,
+      reject,
+      settled: false,
+      browserOpened: false,
+      callbackStarted: false,
+    };
+    attempt.expiryTimer = setTimeout(() => {
+      if (!attempt!.settled) {
+        this.finishAttempt(attempt!, new Error("Timed out waiting for the browser sign-in to complete."));
       }
-      handedOff = true;
-      handoff.answered.then(
-        result => {
-          // Anything but acceptance is the person calling the sign-in off. Arriving after a
-          // successful callback is normal, and finish() ignores it.
-          if (result.action !== "accept") finish(new Error("Sign-in was declined."));
-        },
-        () => {
-          // The client took the request and could not show it after all. Open one here.
-          handedOff = false;
-          openBrowser(url);
-        },
-      );
-    });
-  });
-}
+      this.attempts.delete(attemptId);
+    }, this.signInTimeoutMs);
+    attempt.expiryTimer.unref();
 
-/** Holds the short-lived access token in memory so repeated queries do not re-hit Entra. */
-export class Authenticator {
-  private accessToken?: { value: string; expiresAt: number };
-  private inFlight?: Promise<string>;
-  private signingIn?: Promise<string>;
-
-  constructor(
-    private readonly config: Config,
-    private readonly prompt?: SignInPrompt,
-  ) {}
-
-  async signIn(): Promise<string> {
-    const tokens = await authorizeInteractively(this.config, this.prompt);
-    return await this.accept(tokens);
+    server.on("error", error => this.finishAttempt(attempt!, error));
+    this.attempts.set(attemptId, attempt);
+    this.activeAttemptId = attemptId;
+    return publicAttempt(attempt);
   }
 
-  async signedInAs(): Promise<string | undefined> {
-    return (await readStoredToken(this.config))?.username;
+  private finishAttempt(attempt: PendingSignIn, error?: Error, username?: string): void {
+    if (attempt.settled) return;
+    attempt.settled = true;
+    attempt.server.close();
+    if (this.activeAttemptId === attempt.attemptId) this.activeAttemptId = undefined;
+    error ? attempt.reject(error) : attempt.resolve(username!);
   }
 
   private async accept(tokens: TokenResponse): Promise<string> {
@@ -389,37 +474,6 @@ export class Authenticator {
     return username;
   }
 
-  /**
-   * Returns a usable access token, opening the browser to sign in if nothing is cached.
-   *
-   * Letting the first query sign itself in is what makes a fresh install work without the
-   * caller having to know that `xdr_login` exists. Concurrent callers share one browser
-   * round-trip; without the guard, parallel tool calls would each open a window.
-   */
-  async accessTokenReady(): Promise<string> {
-    try {
-      return await this.accessTokenSilent();
-    } catch (error) {
-      if (!(error instanceof NotSignedInError)) throw error;
-      this.signingIn ??= this.signIn().finally(() => {
-        this.signingIn = undefined;
-      });
-      await this.signingIn;
-      // accept() cached the new access token in memory, so this resolves without a refresh.
-      return await this.accessTokenSilent();
-    }
-  }
-
-  /** Never opens a browser: callers that must not interrupt the user use this instead. */
-  async accessTokenSilent(): Promise<string> {
-    if (this.accessToken && this.accessToken.expiresAt > Date.now()) return this.accessToken.value;
-    // Collapse concurrent refreshes so parallel tool calls do not race on the same token.
-    this.inFlight ??= this.refresh().finally(() => {
-      this.inFlight = undefined;
-    });
-    return await this.inFlight;
-  }
-
   private async refresh(): Promise<string> {
     const stored = await readStoredToken(this.config);
     if (!stored) throw new NotSignedInError();
@@ -433,10 +487,8 @@ export class Authenticator {
         scope: scopeString(this.config),
       });
     } catch (error) {
-      // A grant Entra itself pronounced dead is unrecoverable: drop it so the next call
-      // reports a clean "sign in again" instead of retrying a dead credential. An offline
-      // moment or a 5xx from the token endpoint says nothing about the grant, so the token
-      // stays for the retry that would have succeeded.
+      // A grant Entra itself pronounced dead is unrecoverable. Drop it so the next call
+      // reports a clean sign-in request. Offline and service failures leave it in place.
       if (error instanceof TokenRequestError && error.grantRejected) {
         await clearStoredToken();
         throw new NotSignedInError(`Your saved sign-in is no longer valid (${error.message}).`);

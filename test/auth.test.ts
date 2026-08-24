@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Authenticator, browserOpeners, NotSignedInError } from "../src/auth.js";
-import type { SignInHandoff, SignInPrompt } from "../src/auth.js";
+import type { SignInAttempt } from "../src/auth.js";
 import type { Config } from "../src/config.js";
 
 const config = {
@@ -15,86 +15,231 @@ const config = {
   defaultTimespan: "7d",
 } satisfies Config;
 
-/** Stands in for the cached-token and browser halves so no network or browser is touched. */
-function authenticator(options: { signedIn: boolean }) {
-  const auth = new Authenticator(config);
-  let signedIn = options.signedIn;
-  const silent = vi.spyOn(auth, "accessTokenSilent").mockImplementation(async () => {
-    if (!signedIn) throw new NotSignedInError();
-    return "access-token";
-  });
-  const signIn = vi.spyOn(auth, "signIn").mockImplementation(async () => {
-    signedIn = true;
-    return "user@example.com";
-  });
-  return { auth, silent, signIn };
+const saved = { ...process.env };
+let directory: string;
+
+beforeEach(async () => {
+  directory = await mkdtemp(join(tmpdir(), "xdr-auth-"));
+  process.env.XDG_CONFIG_HOME = directory;
+});
+
+afterEach(() => {
+  process.env = { ...saved };
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+const tokenPath = () => join(directory, "claude-defender-xdr", "token.json");
+
+/** Writes the refresh token a signed-in user would already have. */
+async function cachedSignIn(): Promise<void> {
+  await mkdir(join(directory, "claude-defender-xdr"), { recursive: true });
+  await writeFile(
+    tokenPath(),
+    JSON.stringify({
+      refreshToken: "refresh",
+      username: "analyst@example.com",
+      tenantId: config.tenantId,
+      clientId: config.clientId,
+    }),
+  );
 }
 
-describe("accessTokenReady", () => {
-  it("uses the cached sign-in without opening a browser", async () => {
-    const { auth, signIn } = authenticator({ signedIn: true });
-    await expect(auth.accessTokenReady()).resolves.toBe("access-token");
-    expect(signIn).not.toHaveBeenCalled();
+function idToken(username = "analyst@example.com"): string {
+  return `header.${Buffer.from(JSON.stringify({ preferred_username: username })).toString("base64url")}.signature`;
+}
+
+/** Lets loopback callbacks use real fetch while mocking Entra token requests. */
+function stubTokenEndpoint(
+  response: () => Response = () =>
+    new Response(
+      JSON.stringify({
+        access_token: "access",
+        refresh_token: "refresh",
+        expires_in: 3600,
+        id_token: idToken(),
+      }),
+      { status: 200 },
+    ),
+) {
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.startsWith("http://127.0.0.1:")) return await nativeFetch(input, init);
+    if (url.includes("/oauth2/v2.0/token")) return response();
+    throw new Error(`unexpected request to ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return fetchMock;
+}
+
+function callbackUrl(attempt: SignInAttempt, params: Record<string, string>): URL {
+  const authorize = new URL(attempt.authorizationUrl);
+  const callback = new URL(authorize.searchParams.get("redirect_uri")!);
+  callback.hostname = "127.0.0.1";
+  callback.search = new URLSearchParams(params).toString();
+  return callback;
+}
+
+async function completeCallback(attempt: SignInAttempt, code = "authorization-code"): Promise<Response> {
+  const authorize = new URL(attempt.authorizationUrl);
+  return await fetch(
+    callbackUrl(attempt, {
+      code,
+      state: authorize.searchParams.get("state")!,
+    }),
+  );
+}
+
+describe("pending interactive sign-in", () => {
+  it("returns only after binding a loopback listener on a real ephemeral port", async () => {
+    const auth = new Authenticator(config, { browserOpener: vi.fn() });
+    const attempt = await auth.startSignIn();
+    const authorize = new URL(attempt.authorizationUrl);
+    const redirect = new URL(authorize.searchParams.get("redirect_uri")!);
+
+    expect(redirect.hostname).toBe("localhost");
+    expect(Number(redirect.port)).toBeGreaterThan(0);
+    expect(authorize.searchParams.get("code_challenge_method")).toBe("S256");
+    expect(authorize.searchParams.get("code_challenge")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(authorize.searchParams.get("state")).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(authorize.searchParams.get("prompt")).toBe("select_account");
+
+    const cancelled = expect(auth.waitForSignIn(attempt.attemptId)).rejects.toThrow(/cancelled/);
+    auth.cancelSignIn(attempt.attemptId);
+    await cancelled;
   });
 
-  it("signs in when nothing is cached, so a first query works on its own", async () => {
-    const { auth, signIn } = authenticator({ signedIn: false });
-    await expect(auth.accessTokenReady()).resolves.toBe("access-token");
-    expect(signIn).toHaveBeenCalledTimes(1);
+  it("exchanges a valid callback, stores the refresh token, and completes with the username", async () => {
+    const fetchMock = stubTokenEndpoint();
+    const auth = new Authenticator(config, { browserOpener: vi.fn() });
+    const attempt = await auth.startSignIn();
+    const waiting = auth.waitForSignIn(attempt.attemptId);
+
+    expect((await completeCallback(attempt)).status).toBe(200);
+    await expect(waiting).resolves.toBe("analyst@example.com");
+    await expect(readFile(tokenPath(), "utf8")).resolves.toContain('"refreshToken": "refresh"');
+
+    const tokenCall = fetchMock.mock.calls.find(([input]) => String(input).includes("/oauth2/v2.0/token"))!;
+    const form = new URLSearchParams(String(tokenCall[1]?.body));
+    expect(form.get("code")).toBe("authorization-code");
+    expect(form.get("code_verifier")).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(form.get("redirect_uri")).toMatch(/^http:\/\/localhost:\d+$/);
   });
 
-  it("collapses concurrent callers into one browser round-trip", async () => {
-    const { auth, signIn } = authenticator({ signedIn: false });
-    const tokens = await Promise.all([auth.accessTokenReady(), auth.accessTokenReady(), auth.accessTokenReady()]);
-    expect(tokens).toEqual(["access-token", "access-token", "access-token"]);
-    expect(signIn).toHaveBeenCalledTimes(1);
+  it("rejects invalid state and closes the listener", async () => {
+    stubTokenEndpoint();
+    const auth = new Authenticator(config, { browserOpener: vi.fn() });
+    const attempt = await auth.startSignIn();
+    const waiting = expect(auth.waitForSignIn(attempt.attemptId)).rejects.toThrow(/state validation/);
+
+    expect((await fetch(callbackUrl(attempt, { code: "code", state: "wrong" }))).status).toBe(400);
+    await waiting;
+    await expect(fetch(callbackUrl(attempt, { code: "again", state: "wrong" }))).rejects.toThrow();
   });
 
-  it("allows a later sign-in after an earlier one failed", async () => {
-    const { auth, signIn } = authenticator({ signedIn: false });
-    signIn.mockRejectedValueOnce(new Error("Timed out waiting for the browser sign-in to complete."));
-    await expect(auth.accessTokenReady()).rejects.toThrow(/Timed out/);
-    await expect(auth.accessTokenReady()).resolves.toBe("access-token");
-    expect(signIn).toHaveBeenCalledTimes(2);
+  it("reports Entra callback errors without attempting a token exchange", async () => {
+    const fetchMock = stubTokenEndpoint();
+    const auth = new Authenticator(config, { browserOpener: vi.fn() });
+    const attempt = await auth.startSignIn();
+    const authorize = new URL(attempt.authorizationUrl);
+    const waiting = expect(auth.waitForSignIn(attempt.attemptId)).rejects.toThrow("The operator declined.");
+
+    const response = await fetch(
+      callbackUrl(attempt, {
+        error: "access_denied",
+        error_description: "The operator declined.\nTrace ID: 1",
+        state: authorize.searchParams.get("state")!,
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    await waiting;
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes("/oauth2/v2.0/token"))).toBe(false);
   });
 
-  it("does not sign in again for failures that a sign-in cannot fix", async () => {
-    const { auth, silent, signIn } = authenticator({ signedIn: true });
-    silent.mockRejectedValue(new Error("Microsoft Graph is unreachable"));
-    await expect(auth.accessTokenReady()).rejects.toThrow(/unreachable/);
-    expect(signIn).not.toHaveBeenCalled();
+  it("closes and rejects on cancellation", async () => {
+    const auth = new Authenticator(config, { browserOpener: vi.fn() });
+    const attempt = await auth.startSignIn();
+    const waiting = expect(auth.waitForSignIn(attempt.attemptId)).rejects.toThrow(/declined/);
+
+    auth.cancelSignIn(attempt.attemptId, "Sign-in was declined.");
+
+    await waiting;
+    expect(auth.signInAttempt(attempt.attemptId)).toBeUndefined();
+    await expect(fetch(callbackUrl(attempt, { code: "late", state: "late" }))).rejects.toThrow();
+  });
+
+  it("closes and rejects when the token exchange fails", async () => {
+    stubTokenEndpoint(
+      () =>
+        new Response(JSON.stringify({ error: "invalid_grant", error_description: "The authorization code expired." }), {
+          status: 400,
+        }),
+    );
+    const auth = new Authenticator(config, { browserOpener: vi.fn() });
+    const attempt = await auth.startSignIn();
+    const waiting = expect(auth.waitForSignIn(attempt.attemptId)).rejects.toThrow(/authorization code expired/);
+
+    expect((await completeCallback(attempt)).status).toBe(200);
+    await waiting;
+  });
+
+  it("times out and allows a later attempt", async () => {
+    const auth = new Authenticator(config, { browserOpener: vi.fn(), signInTimeoutMs: 20 });
+    const first = await auth.startSignIn();
+    const waiting = expect(auth.waitForSignIn(first.attemptId)).rejects.toThrow(/Timed out/);
+
+    await waiting;
+    const second = await auth.startSignIn();
+    expect(second.attemptId).not.toBe(first.attemptId);
+    auth.cancelSignIn(second.attemptId);
+  });
+
+  it("collapses concurrent callers into one listener and attempt", async () => {
+    const auth = new Authenticator(config, { browserOpener: vi.fn() });
+    const attempts = await Promise.all([auth.startSignIn(), auth.startSignIn(), auth.startSignIn()]);
+
+    expect(new Set(attempts.map(attempt => attempt.attemptId))).toHaveLength(1);
+    auth.cancelSignIn(attempts[0]!.attemptId);
+  });
+
+  it("does not let a failed attempt poison the next one", async () => {
+    const auth = new Authenticator(config, { browserOpener: vi.fn() });
+    const first = await auth.startSignIn();
+    const failed = expect(auth.waitForSignIn(first.attemptId)).rejects.toThrow(/first failed/);
+    auth.cancelSignIn(first.attemptId, "first failed");
+    await failed;
+
+    const second = await auth.startSignIn();
+    expect(second.attemptId).not.toBe(first.attemptId);
+    auth.cancelSignIn(second.attemptId);
+  });
+
+  it("opens the fallback browser exactly once and writes nothing to stdout", async () => {
+    const opener = vi.fn();
+    const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    const auth = new Authenticator(config, { browserOpener: opener });
+    const attempt = await auth.startSignIn();
+
+    auth.openSignInInBrowser(attempt.attemptId);
+    auth.openSignInInBrowser(attempt.attemptId);
+
+    expect(opener).toHaveBeenCalledOnce();
+    expect(opener).toHaveBeenCalledWith(attempt.authorizationUrl);
+    expect(stdout).not.toHaveBeenCalled();
+    auth.cancelSignIn(attempt.attemptId);
   });
 });
 
 describe("refreshing the cached sign-in", () => {
-  const saved = { ...process.env };
-  let directory: string;
+  it("reports a missing saved sign-in without starting an interactive attempt", async () => {
+    const opener = vi.fn();
+    const auth = new Authenticator(config, { browserOpener: opener });
 
-  beforeEach(async () => {
-    directory = await mkdtemp(join(tmpdir(), "xdr-auth-"));
-    process.env.XDG_CONFIG_HOME = directory;
+    await expect(auth.accessTokenSilent()).rejects.toBeInstanceOf(NotSignedInError);
+    expect(opener).not.toHaveBeenCalled();
   });
-
-  afterEach(() => {
-    process.env = { ...saved };
-    vi.unstubAllGlobals();
-  });
-
-  const tokenPath = () => join(directory, "claude-defender-xdr", "token.json");
-
-  /** Writes the refresh token a signed-in user would already have. */
-  async function cachedSignIn(): Promise<void> {
-    await mkdir(join(directory, "claude-defender-xdr"), { recursive: true });
-    await writeFile(
-      tokenPath(),
-      JSON.stringify({
-        refreshToken: "refresh",
-        username: "analyst@example.com",
-        tenantId: config.tenantId,
-        clientId: config.clientId,
-      }),
-    );
-  }
 
   // The regression this guards: a laptop that was briefly offline used to lose its saved
   // sign-in, because every refresh failure was treated as a dead grant and deleted the token.
@@ -157,15 +302,14 @@ describe("browserOpeners", () => {
     }
   });
 
-  // explorer.exe reads its argument as a path before trying it as a URL, and an authorize URL
-  // is longer than Windows allows a path to be. It opens a file browser window instead.
+  // explorer.exe reads its argument as a path before trying it as a URL. It opens a file
+  // browser window instead once the authorize URL exceeds the Windows path limit.
   it("never asks explorer.exe to open a URL", () => {
     for (const opener of browserOpeners("win32", url)) {
       expect(opener.command).not.toMatch(/explorer/i);
     }
   });
 
-  // ShellExecute via url.dll is the native association lookup, with no shell to escape for.
   it("reaches the default browser through ShellExecute first on win32", () => {
     const first = browserOpeners("win32", url)[0]!;
     expect(first.command).toMatch(/rundll32/i);
@@ -173,20 +317,17 @@ describe("browserOpeners", () => {
     expect(first.verbatim).toBeUndefined();
   });
 
-  // cmd reads a bare `&` as a command separator, which would cut the query string short.
   it("escapes every & for the cmd fallback, and quotes nothing", () => {
-    const cmd = browserOpeners("win32", url).find(o => o.command === "cmd.exe")!;
+    const cmd = browserOpeners("win32", url).find(opener => opener.command === "cmd.exe")!;
     expect(cmd.verbatim).toBe(true);
     const target = cmd.args.at(-1)!;
     expect(target).toBe(url.replace(/&/g, "^&"));
     expect(target).not.toMatch(/&(?<!\^&)/);
-    // Quoting would make cmd pass the carets through to the browser verbatim.
     expect(target).not.toContain('"');
   });
 
-  // `start` reads its first quoted argument as a window title, so the title has to be there.
   it("gives start its title argument before the URL", () => {
-    const cmd = browserOpeners("win32", url).find(o => o.command === "cmd.exe")!;
+    const cmd = browserOpeners("win32", url).find(opener => opener.command === "cmd.exe")!;
     expect(cmd.args.indexOf('""')).toBeGreaterThan(cmd.args.indexOf("start"));
     expect(cmd.args.indexOf('""')).toBeLessThan(cmd.args.length - 1);
   });
@@ -195,64 +336,5 @@ describe("browserOpeners", () => {
     const fallback = browserOpeners("win32", url).at(-1)!;
     expect(fallback.command).toBe("cmd.exe");
     expect(browserOpeners("win32", url)).toHaveLength(2);
-  });
-});
-
-describe("handing the sign-in URL to the client", () => {
-  /** Records what the client was asked to show, and answers the dialog on command. */
-  function recordingPrompt(action: "accept" | "decline") {
-    const seen: { url?: string; elicitationId?: string; settled: string[] } = { settled: [] };
-    const prompt: SignInPrompt = {
-      handOff(url, elicitationId): SignInHandoff {
-        seen.url = url;
-        seen.elicitationId = elicitationId;
-        return {
-          answered: Promise.resolve({ action }),
-        };
-      },
-      settle(elicitationId) {
-        seen.settled.push(elicitationId);
-      },
-    };
-    return { prompt, seen };
-  }
-
-  it("gives the client the authorize URL instead of launching a browser", async () => {
-    const { prompt, seen } = recordingPrompt("decline");
-    await expect(new Authenticator(config, prompt).signIn()).rejects.toThrow(/declined/);
-    expect(seen.url).toContain(`${config.loginBaseUrl}/${config.tenantId}/oauth2/v2.0/authorize`);
-    expect(seen.url).toContain("code_challenge_method=S256");
-    // The redirect has to name the loopback port the listener actually bound.
-    expect(seen.url).toMatch(/redirect_uri=http%3A%2F%2Flocalhost%3A\d+/);
-  });
-
-  it("takes the client's dialog down once the sign-in is over", async () => {
-    const { prompt, seen } = recordingPrompt("decline");
-    await expect(new Authenticator(config, prompt).signIn()).rejects.toThrow(/declined/);
-    expect(seen.settled).toEqual([seen.elicitationId]);
-  });
-
-  it("uses a fresh elicitation id per sign-in, so a stale dialog is never dismissed", async () => {
-    const first = recordingPrompt("decline");
-    const second = recordingPrompt("decline");
-    await expect(new Authenticator(config, first.prompt).signIn()).rejects.toThrow(/declined/);
-    await expect(new Authenticator(config, second.prompt).signIn()).rejects.toThrow(/declined/);
-    expect(first.seen.elicitationId).not.toBe(second.seen.elicitationId);
-  });
-
-  it("falls back to a local browser when the client cannot show a URL", async () => {
-    // handOff returning undefined is the no-elicitation client. Nothing is settled, because
-    // there is no dialog to take down, and the sign-in waits on the loopback as before.
-    const settled: string[] = [];
-    const prompt: SignInPrompt = {
-      handOff: () => undefined,
-      settle: id => settled.push(id),
-    };
-    const auth = new Authenticator(config, prompt);
-    const pending = auth.signIn();
-    // Nothing resolves it here, so prove it stayed pending rather than erroring out.
-    const race = await Promise.race([pending.then(() => "settled", () => "rejected"), Promise.resolve("pending")]);
-    expect(race).toBe("pending");
-    expect(settled).toEqual([]);
   });
 });

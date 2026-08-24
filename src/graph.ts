@@ -100,13 +100,13 @@ const sleep = (ms: number, signal: AbortSignal) =>
 export async function runHuntingQuery(
   auth: Authenticator,
   config: Config,
-  input: { query: string; timespan?: string; silent?: boolean },
+  input: { query: string; timespan?: string },
 ): Promise<HuntingResult> {
   if (!input.query.trim()) throw new Error("The KQL query must not be empty");
 
-  // Queries the user asked for may open a browser to sign in; queries the plugin runs on its
-  // own behalf — the zero-row schema probe — must not, so they pass `silent`.
-  const token = input.silent ? await auth.accessTokenSilent() : await auth.accessTokenReady();
+  // Interactive sign-in belongs to the MCP tool handler, which can return input_required.
+  // Graph calls only consume a token that is already usable or can refresh silently.
+  const token = await auth.accessTokenSilent();
   const body = JSON.stringify({
     Query: input.query,
     ...(input.timespan ? { Timespan: normalizeTimespan(input.timespan) } : {}),
