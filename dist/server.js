@@ -29270,7 +29270,7 @@ function createRequestStateCodec(options) {
 var plugin_default = {
   name: "defender-xdr",
   displayName: "Microsoft Defender XDR",
-  version: "1.3.0",
+  version: "2.0.0",
   description: "Ask questions in plain English and get answers from Microsoft Defender XDR Advanced Hunting",
   author: {
     name: "Andrew Childs"
