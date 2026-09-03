@@ -74,41 +74,61 @@ describe("production stdio entry", () => {
     }
   });
 
-  it("rejects a 2025 initialize opening", async () => {
+  // Claude Code 2.1.238 still opens with 2025-11-25. Rejecting that opening took every tool
+  // away from current installs, which is the 2.0.0 regression this test now guards against.
+  it("serves a 2025-era client and still lists all four tools", async () => {
     const child = spawn(process.execPath, [serverPath], {
       env: await childEnvironment(),
       stdio: ["pipe", "pipe", "pipe"],
     });
     const lines = createInterface({ input: child.stdout });
-    const response = new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("stdio server did not answer initialize")), 5_000);
-      lines.once("line", line => {
-        clearTimeout(timer);
-        resolve(line);
+    const nextLine = () =>
+      new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("stdio server did not answer")), 5_000);
+        lines.once("line", line => {
+          clearTimeout(timer);
+          resolve(line);
+        });
+        child.once("error", reject);
       });
-      child.once("error", reject);
-    });
+    const send = (message: Record<string, unknown>) => child.stdin.write(`${JSON.stringify(message)}\n`);
 
     try {
-      child.stdin.write(
-        `${JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "initialize",
-          params: {
-            protocolVersion: "2025-11-25",
-            capabilities: {},
-            clientInfo: { name: "legacy-test", version: "1.0.0" },
-          },
-        })}\n`,
-      );
-      const message = JSON.parse(await response) as {
-        error?: { code?: number; message?: string; data?: { supported?: string[] } };
+      const opened = nextLine();
+      send({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-25",
+          capabilities: { elicitation: { form: {} } },
+          clientInfo: { name: "legacy-test", version: "1.0.0" },
+        },
+      });
+      const initialize = JSON.parse(await opened) as {
+        error?: unknown;
+        result?: { protocolVersion?: string; serverInfo?: { name?: string } };
       };
 
-      expect(message.error?.code).toBe(-32022);
-      expect(message.error?.message).toContain("Unsupported protocol version");
-      expect(message.error?.data?.supported).toEqual(["2026-07-28"]);
+      expect(initialize.error).toBeUndefined();
+      expect(initialize.result?.protocolVersion).toBe("2025-11-25");
+      expect(initialize.result?.serverInfo?.name).toBe("defender-xdr");
+
+      send({ jsonrpc: "2.0", method: "notifications/initialized" });
+      const listed = nextLine();
+      send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+      const tools = JSON.parse(await listed) as {
+        error?: unknown;
+        result?: { tools?: Array<{ name: string }> };
+      };
+
+      expect(tools.error).toBeUndefined();
+      expect(tools.result?.tools?.map(tool => tool.name)).toEqual([
+        "xdr_login",
+        "xdr_logout",
+        "xdr_run_query",
+        "xdr_get_schema",
+      ]);
     } finally {
       lines.close();
       child.stdin.end();
